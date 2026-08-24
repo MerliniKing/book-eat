@@ -1,6 +1,6 @@
 ---
 name: book-eat
-description: Deep-digest a book into a permanent, page-cited knowledge base — the AI reads the whole book so you learn from distilled notes instead of raw text. Full-text caching (text-layer extraction or OCR for scanned PDFs), tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, and a resumable six-step state machine. Use when the user says "eat this book", "process this book", drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built. Triggers: book digest, ingest book, deep reading, book summary, knowledge base, book notes.
+description: "Deep-digest a book into a permanent, page-cited knowledge base — the AI reads the whole book so you learn from distilled notes instead of raw text. Full-text caching (text-layer extraction or OCR for scanned PDFs), tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, and a resumable six-step state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built. Triggers: book digest, ingest book, deep reading, book summary, knowledge base, book notes."
 ---
 
 # book-eat · Digest a Book
