@@ -20,6 +20,7 @@ books/<book>/       README.md (outline & tiering), deep notes, summaries
 topics/<area>/      topic notes — area dirs are created on demand, never pre-set
 cards/              review cards (Q/A)
 INDEX.md            progress kanban
+READER.md           optional reader-taste profile — governs all note/card output style (see ③④⑤)
 ```
 
 Bootstrap rules (Step 0, before anything else):
@@ -71,6 +72,7 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 ## ③④⑤ Close reading → archiving → cards
 
 - Produce `deep-NN` / `summary-NN` notes **strictly per the confirmed tiering table**; for large books across sessions, commit+push and update INDEX after every 1–2 notes
+- **Reader-taste alignment (optional)**: the library root may carry a `READER.md` (reader-taste profile — how this reader reads, endorsed output patterns, the file's own revision rules). If present, read it before writing any note/card and follow its output preferences; style-direction feedback from sessions goes back into that file per its own revision rules
 - **Quality gate**: quotations, factual data (dates/names/editions), tables, and plates → verify against the original page image
   - an image-capable tool available (vision MCP etc.) → AI checks the page images directly
   - none available → still emit the quotation/low-confidence page list marked **⚠ needs human review**; never silently skip verification
