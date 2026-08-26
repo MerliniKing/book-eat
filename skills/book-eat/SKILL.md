@@ -24,7 +24,7 @@ READER.md           optional reader-taste profile — governs all note/card outp
 ```
 
 Bootstrap rules (Step 0, before anything else):
-- `tools/run_ocr.py` missing at library root → copy it from this skill's `tools/` directory
+- `tools/run_ocr.py` (extraction) or `tools/quote_check.py` / `tools/check_source.py` (verification gates) missing at library root → copy them from this skill's `tools/` directory
 - `sources/ books/ cards/ topics/` or `INDEX.md` missing → create them; seed `INDEX.md` from `scaffold/INDEX-template.md`
 - library `CLAUDE.md` missing the knowledge spec → append `scaffold/CLAUDE-snippet.md`
 
@@ -53,6 +53,7 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 - Artifacts: `pages/` per-page text, `full.txt` with page markers, `toc.txt` (TOC → start page; junk bookmarks auto-discarded), `quality_report.txt` (OCR path only)
 - Page markers: `===== PDF page N =====` / `===== EPUB page N · <chapter> =====` (EPUB synthetic page numbers are deterministic per book)
 - When done, read `quality_report.txt` → flag low-confidence pages as visual-verification candidates
+- **Source-completeness gate (both paths, before ②)**: `python3 tools/check_source.py books/<book>/ocr/full.txt` — catches NUL-polluted text layers and **heading-only pages** (a text-layer EPUB can drop an entire chapter body silently; every quotation from that chapter is then unsourced without anyone noticing). Resolve each ⚠ before outlining: benign thin page (front matter, figure-only) → note it in the book README; real missing chapter → register the defect in the README and treat its content as unsourced from here on
 
 ## ② Outline → ⛔ confirmation gate
 
@@ -73,14 +74,16 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 
 - Produce `deep-NN` / `summary-NN` notes **strictly per the confirmed tiering table**; for large books across sessions, commit+push and update INDEX after every 1–2 notes
 - **Reader-taste alignment (optional)**: the library root may carry a `READER.md` (reader-taste profile — how this reader reads, endorsed output patterns, the file's own revision rules). If present, read it before writing any note/card and follow its output preferences; style-direction feedback from sessions goes back into that file per its own revision rules
-- **Quality gate**: quotations, factual data (dates/names/editions), tables, and plates → verify against the original page image
-  - an image-capable tool available (vision MCP etc.) → AI checks the page images directly
-  - none available → still emit the quotation/low-confidence page list marked **⚠ needs human review**; never silently skip verification
+- **Quality gate (write-side, binding)**:
+  - *Before writing*: quotations are **copied from `ocr/full.txt`, never typed from memory**. A passage you cannot find in the cache does not exist for citation purposes — either locate it in the cache or write it as general knowledge with **⚠unverified**
+  - *After writing, before commit*: `python3 tools/quote_check.py books/<book>/ocr/full.txt <note files...>` — every MISS must be resolved on the spot, one of: OCR/variant noise (open the page and confirm), translated quote (foreign-language books: verify the rendering against the original), or **⚠unverified** with reason. Never commit with unresolved misses
+  - *Read-side, where the cache is suspect*: low-confidence pages from `quality_report.txt`, woodblock-printed classics, tables and plates → verify against the original page image; an image-capable tool (vision MCP etc.) → check the page images directly; none → emit the quotation/low-confidence page list marked **⚠ needs human review** — never silently skip
+  - factual data (dates/names/editions/counts) follows the same rule: cache first, page image when the cache is suspect, ⚠ otherwise
 - Archive into the matching `topics/<area>/`, backfill book evidence (upgrade `⚠unverified` → verified), extend the glossary, create cards in `cards/` (with difficulty 1–5)
 
 ## ⑥ Kanban & optional publish
 
-- INDEX all green → commit + push
+- INDEX all green **and card coverage holds**: every book with deep-read notes has a card file in `cards/` (a noted book without cards is NOT green — produce the cards, or record an explicit waiver with reason in the book's README) → commit + push
 - Publishing (optional, **library-defined**): if the library root provides `tools/publish.sh`, run it here — that script is yours to write (HTML build, deploy, whatever your setup needs); document its actual behavior in the library's own CLAUDE.md. No such script → Step ⑥ ends at the INDEX commit
 
 ## Knowledge spec (binding for all writing)
@@ -105,6 +108,9 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 - "skip the tiering confirmation, we'll review at the end" → violates the confirmation gate; return to ②
 - OCR long task run bare without `timeout` → killed at ~10 min, wasted run
 - quotations trusted straight from OCR without re-checking → violates the quality gate
+- **a quotation typed from memory because "I know this classic"** → the write-side gate exists precisely for this; copy from the cache or mark ⚠unverified
+- **quote_check MISS waved through as "probably OCR noise" without opening the page** → the gate's whole point is forcing that look; unresolved misses are how hallucinated/inverted quotations survive
+- **a text-layer EPUB assumed complete without running check_source** → chapter bodies can be silently absent; every quote from the gap is unsourced
 - skipping Step 0 state detection and running from scratch → may redo finished work
 - a .mobi/.azw3 dropped into `sources/` awaiting the pipeline → ① only accepts pdf/epub; convert first
 
