@@ -83,7 +83,8 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 
 ## ⑥ Kanban & optional publish
 
-- INDEX all green **and card coverage holds**: every book with deep-read notes has a card file in `cards/` (a noted book without cards is NOT green — produce the cards, or record an explicit waiver with reason in the book's README) → commit + push
+- Run the unified auditor once before declaring green: `python3 tools/audit_library.py` (in the library root) — source integrity + quotation backtrace over all notes/cards + figure-coverage suspects + card-coverage listing, one markdown report
+- INDEX all green means: every auditor finding carries a recorded attribution (OCR noise opened-and-confirmed / translation checked / ⚠unverified with reason / waiver annotated 已核); every book with deep-read notes resolves to a card file (produce cards or a written waiver in the book README) → commit + push
 - Publishing (optional, **library-defined**): if the library root provides `tools/publish.sh`, run it here — that script is yours to write (HTML build, deploy, whatever your setup needs); document its actual behavior in the library's own CLAUDE.md. No such script → Step ⑥ ends at the INDEX commit
 
 ## Knowledge spec (binding for all writing)
@@ -118,3 +119,5 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 ## Maintenance
 
 This English `SKILL.md` is the canonical source. `SKILL.zh.md` is the Chinese mirror — update both together; if they drift, English wins.
+
+**Stale verdicts** (fs1-04 case): any stored absence conclusion ("no plates here", "quota cleared", "chapter has no figures") must carry its scan window / date. When a gate's logic changes, or a counterexample surfaces anywhere in the library, re-run the current gates over *completed* books too — "done" books are exactly where frozen wrong verdicts live (`audit_library.py` exists to make that cheap).

@@ -85,7 +85,8 @@ timeout 480 python3 tools/run_ocr.py <书名> sources/<pdf或epub>   # 重复执
 
 ## ⑥ 看板 + 可选发布
 
-- INDEX 全绿**且卡覆盖成立**：凡有精读笔记的书在 `cards/` 有对应卡（有笔记无卡 ≠ 全绿——要么补卡，要么在该书 README 记录成文豁免及原因）→ commit + push
+- 宣布全绿前先跑一次统一审计：`python3 tools/audit_library.py`（库根执行）——源完整性＋全部笔记/卡片引文回溯＋图版覆盖嫌疑＋卡片覆盖清单，一份 markdown 报告
+- INDEX 全绿＝审计器每条发现都有归因记录（OCR 噪声已开页核对／译引已对原文／⚠未验证＋原因／豁免已加「已核」注记）；凡有精读笔记的书都能对到卡片文件（补卡或 README 成文豁免）→ commit + push
 - 发布（可选，**由各库自定义**）：库根若提供 `tools/publish.sh` 则在此执行——该脚本由库主人自写（HTML 构建/部署等，随你的环境定），实际行为建议写进该库自己的 CLAUDE.md。无此脚本则⑥止步于 INDEX 提交
 
 ## 知识规格（一切写作不可违反）
@@ -106,7 +107,6 @@ timeout 480 python3 tools/run_ocr.py <书名> sources/<pdf或epub>   # 重复执
 - 依赖缺失自动补装：`pip3 install --user --break-system-packages pymupdf rapidocr-onnxruntime`（有 sudo 或 venv 的主机去掉 `--break-system-packages`）
 
 ## Red Flags（出现即停，自查）
-
 - "分级表先不问了，做完一起看" → 违反确认门，回到②
 - OCR 长任务裸跑不加 timeout → 10 分钟被杀白跑
 - 精读引文直接信 OCR 未回查 → 违反质量门
@@ -116,3 +116,7 @@ timeout 480 python3 tools/run_ocr.py <书名> sources/<pdf或epub>   # 重复执
 - **图版覆盖靠「图N」连续性或章节页码窗扫描来宣布** → 附录/表格内木刻挂的是表号（非图N题注）、且常住在章节窗之外；应改查「讲义文本含图指涉（132图计数/图版/图样）而嵌图为零」——引用存在性≠覆盖性
 - 跳过第0步状态检测直接从头跑 → 可能重做已完成工作
 - 拿到 .mobi/.azw3 直接塞 sources/ 等流水线跑 → ①只认 pdf/epub，先转换
+
+## 维护
+
+英文 `SKILL.md` 是规范真相源，本文件是中文镜像。另有一条经验律（fs1-04 第四案）：**一切缺席性结论（「无图版」「已清零」「该章无正文」）入库必须带扫描窗/日期**——门逻辑变更或库内任何地方出现反例时，用 `tools/audit_library.py` 对**已完结书也重扫**（「已完成」恰是冻结错误结论的藏身处）。
