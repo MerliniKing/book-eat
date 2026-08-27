@@ -14,6 +14,9 @@ r"""glm_parse —— 多模态直读逐页解析流水线（fs1 三轮对比实�
   merge   <书> --round A [--dir /tmp/glm_parse]
           校验并合并 round<A>-pa-*.jsonl 分片 → books/<书>/glm-parse/roundA-all.jsonl
           （自动修复行内直引号；校验行数/连续性/字段完整性）
+  crop    <书> --round A [--slug fs1] [--type figure|table] [--pages 1,5-9] [--dry-run]
+          消费 round jsonl 的 regions：按框裁剪源 PDF 并登记 img/图录.json
+          （文件名 <slug>-glm-p<页>-<序>.jpg；--dry-run 只列将产出的裁剪不落盘）
   compare <书> --round A [--table-pages 201-266]
           页级漏报/误报（GT=图录有图页∪表页）＋区域 IoU（vs 图录 rect）
           文字质量不在此测（OCR 已退役，新书的文字全文以 glm_parse 轮次产出为准；
@@ -40,7 +43,8 @@ PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫
 判定规则：
 1. has_table=true 当且仅当页面存在由边框线/行列分隔线构成的表格结构
 2. has_figure=true 当页面存在正文文字排版之外的图形：插图、照片、地图、图表、示意图、手绘图皆算；纯装饰纹样、页眉页脚不算
-3. regions：每个图表的最小完整外接框，必须把题注、图内标注、紧邻图例一起包入（表格含边框整体）；坐标为页面百分比（x0左/y0上/x1右/y1下，0–100，原点左上）；无图表填 []
+3. regions：每个独立图表的最小完整外接框，必须把题注、图内标注、紧邻图例一起包入（表格含边框整体）；坐标为页面百分比（x0左/y0上/x1右/y1下，0–100，原点左上）；无图表填 []
+   ★ 表格内部嵌的小图不单独标注坐标——一张表只给一组 table 坐标；表格之外的独立图才单独框
 4. text：忠实转写该页全部正文文字，按阅读顺序，含章节标题；表格与图内部文字不转写；空白页输出 ""；辨认不清的字写【不可辨】
 5. 纪律：每页必须亲眼看过再判定；不跳页、不臆测；扫描污渍不是图
 
@@ -135,6 +139,65 @@ def cmd_merge(a):
     nt = sum(rows[p]['has_table'] for p in pages)
     print('✓ %s（%d 页 %d-%d 连续）has_figure=%d has_table=%d' % (out, len(pages), pages[0], pages[-1], nf, nt))
 
+def cmd_crop(a):
+    import fitz
+    broot = book_root(a.book)
+    path = os.path.join(broot, 'glm-parse', 'round%s-all.jsonl' % a.round)
+    rows = {r['page']: r for r in map(json.loads, filter(str.strip, open(path, encoding='utf8')))}
+    man_path = os.path.join(broot, 'img', '图录.json')
+    figs = json.load(open(man_path)) if os.path.exists(man_path) else []
+    have = {e['file'] for e in figs}
+    pdf = find_pdf(a.book, a.pdf)
+    doc = fitz.open(pdf)
+    slug = a.slug or a.book.split('-')[-1]
+    want_pages = None
+    if a.pages:
+        want_pages = set()
+        for seg in a.pages.split(','):
+            if '-' in seg:
+                lo, hi = map(int, seg.split('-')); want_pages |= set(range(lo, hi + 1))
+            else:
+                want_pages.add(int(seg))
+    plan = []
+    for p in sorted(rows):
+        if want_pages and p not in want_pages:
+            continue
+        pw, ph = doc[p - 1].rect.width, doc[p - 1].rect.height
+        k = 0
+        for rg in rows[p].get('regions', []):
+            x0, y0, x1, y1, typ = rg[0], rg[1], rg[2], rg[3], rg[4] if len(rg) > 4 else 'figure'
+            if a.type and typ != a.type:
+                continue
+            k += 1
+            fn = '%s-glm-p%03d-%d.jpg' % (slug, p, k)
+            plan.append((p, typ, (x0 / 100 * pw, y0 / 100 * ph, x1 / 100 * pw, y1 / 100 * ph), fn))
+    doc.close()
+    print('计划裁剪 %d 项（round%s / type=%s / pages=%s）' % (len(plan), a.round, a.type or '全部', a.pages or '全部'))
+    if a.dry_run:
+        for p, typ, rect, fn in plan:
+            dup = ' [文件名已存在，将跳过]' if fn in have else ''
+            print('  p%-4d %-6s %s%s' % (p, typ, fn, dup))
+        return
+    import fitz as F
+    doc = F.open(pdf)
+    added = skipped = 0
+    for p, typ, rect, fn in plan:
+        if fn in have:
+            skipped += 1; continue
+        clip = F.Rect(*rect)
+        pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.dpi, colorspace=F.csGRAY)
+        out = os.path.join(broot, 'img', fn)
+        pix.save(out)
+        entry = {'file': fn, 'pdf': pdf, 'page': p,
+                 'rect': [round(v, 1) for v in rect], 'dpi': a.dpi,
+                 'caption': 'glm_parse round%s p%d %s 区域裁剪' % (a.round, p, typ)}
+        figs = [e for e in figs if e.get('file') != fn] + [entry]
+        added += 1
+    doc.close()
+    json.dump(figs, open(man_path, 'w'), ensure_ascii=False, indent=1)
+    print('✓ 新增登记 %d 项，跳过已存在 %d 项 → 图录 %s（共 %d 条）' % (added, skipped, man_path, len(figs)))
+
+
 def cmd_compare(a):
     broot = book_root(a.book)
     path = os.path.join(broot, 'glm-parse', 'round%s-all.jsonl' % a.round)
@@ -177,7 +240,7 @@ def cmd_compare(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('子命令：')[0])
-    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'compare'])
+    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'crop', 'compare'])
     ap.add_argument('book')
     ap.add_argument('--pdf'); ap.add_argument('--dpi', type=int, default=100)
     ap.add_argument('--workdir', default=None)
@@ -186,10 +249,15 @@ def main():
     ap.add_argument('--out', default='/tmp/glm_parse')
     ap.add_argument('--dir', default='/tmp/glm_parse')
     ap.add_argument('--table-pages', default=None)
+    ap.add_argument('--slug', default=None)
+    ap.add_argument('--type', default=None, choices=[None, 'figure', 'table'])
+    ap.add_argument('--pages', default=None)
+    ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
     if a.workdir is None:
         a.workdir = '/tmp/glm_parse_' + re.sub(r'[^\w]', '', a.book)
-    {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge, 'compare': cmd_compare}[a.cmd](a)
+    {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge,
+     'crop': cmd_crop, 'compare': cmd_compare}[a.cmd](a)
 
 if __name__ == '__main__':
     main()
