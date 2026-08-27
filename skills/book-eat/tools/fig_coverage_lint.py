@@ -67,6 +67,11 @@ def book_appendix_probe(book):
     if not hits:
         return None
     figs = json.load(open(man))
+    if not figs:
+        return hits[:5]
+    if all(f.get('page') == 0 and 'epub' in str(f.get('pdf', '')).lower()
+           for f in figs):
+        return None                     # EPUB 全媒体收割：内嵌插图整包落库，无页码语义，尾区探测不适用
     if any(isinstance(f.get('page'), int) and f['page'] >= tail_from for f in figs):
         return None                     # 尾区已有收割条目
     return hits[:5]
