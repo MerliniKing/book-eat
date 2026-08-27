@@ -111,6 +111,7 @@ timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun
 - **a quotation typed from memory because "I know this classic"** → the write-side gate exists precisely for this; copy from the cache or mark ⚠unverified
 - **quote_check MISS waved through as "probably OCR noise" without opening the page** → the gate's whole point is forcing that look; unresolved misses are how hallucinated/inverted quotations survive
 - **a text-layer EPUB assumed complete without running check_source** → chapter bodies can be silently absent; every quote from the gap is unsourced
+- **figure coverage declared from 图N-caption continuity or a chapter-window page scan** → appendix/table woodcuts carry table numbers (not 图N captions) and often live outside the chapter window; lint the lesson text for figure-talk (counts like “132图”, 图版/图样) with zero embedded images instead — existence of referenced images is not coverage
 - skipping Step 0 state detection and running from scratch → may redo finished work
 - a .mobi/.azw3 dropped into `sources/` awaiting the pipeline → ① only accepts pdf/epub; convert first
 
