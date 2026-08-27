@@ -16,7 +16,8 @@ r"""glm_parse —— 多模态直读逐页解析流水线（fs1 三轮对比实�
           （自动修复行内直引号；校验行数/连续性/字段完整性）
   compare <书> --round A [--table-pages 201-266]
           页级漏报/误报（GT=图录有图页∪表页）＋区域 IoU（vs 图录 rect）
-          ＋文字抽检相似度（vs ocr/pages）；--table-pages 缺省只用图录页当 GT 并注明局限
+          文字质量不在此测（OCR 已退役，新书的文字全文以 glm_parse 轮次产出为准；
+          抽验走 overlay 叠框图/人工抽页协议）
 
 正典 PROMPT（2026-08-28 用户确认合并版：A 判据条款 × C 示例校准 × B/C 双保险交付）：
 见 PROMPT 常量。改它须经用户确认。
@@ -173,23 +174,6 @@ def cmd_compare(a):
     vals.sort()
     print('区域IoU vs 图录%d条: 中位=%.2f 均值=%.2f >=0.5 %d/%d' %
           (len(vals), vals[len(vals)//2], sum(vals)/len(vals), sum(1 for v in vals if v >= .5), len(vals)))
-    # 文字抽检
-    import difflib, random
-    opages = glob.glob(os.path.join(broot, 'ocr', 'pages', 'p*.txt'))
-    if opages:
-        random.seed(7)
-        sample = sorted(random.sample(opages, min(12, len(opages))))
-        sims = []
-        for op in sample:
-            p = int(re.search(r'p(\d+)\.txt', op).group(1))
-            if p not in rows: continue
-            o = open(op, errors='ignore').read().replace('\n', '')
-            x = rows[p]['text'].replace('\n', '')
-            if o and x:
-                sims.append((p, difflib.SequenceMatcher(None, x[:3000], o[:3000]).ratio()))
-        if sims:
-            s = sorted(v for _, v in sims)
-            print('文字抽检%d页: 中位=%.2f 明细=%s' % (len(sims), s[len(s)//2], [(p, round(v, 2)) for p, v in sims]))
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('子命令：')[0])
