@@ -1,6 +1,6 @@
 ---
 name: book-eat
-description: "Deep-digest a book into a permanent, page-cited knowledge base — text is taken from the source directly whenever present (text layer / structural unpack); vision reading is the fallback for scanned pages; every page is archived (figure/table presence + bbox + full text) (figure/table presence + bbox + full text). Tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, figure harvesting driven by the archive's bboxes, and a resumable state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built."
+description: "Deep-digest a book into a permanent, page-cited knowledge base — text is taken from the source directly whenever present (text layer / structural unpack); vision reading is the fallback for scanned pages; every page is archived (figure/table presence + bbox + full text) (figure/table presence + bbox + full text). every page is distilled by AI (no skipping, no outline gate), topic archiving, glossary building, spaced-repetition review cards, figure harvesting driven by the archive's bboxes, and a resumable state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built."
 ---
 
 # Book Eat v2 · extraction-first pipeline (2026-08-28)
@@ -57,9 +57,10 @@ directory that owns `books/` so relative paths resolve.
 |---|---|---|
 | ① parse · render | `book_parse render <book> [--pdf src]`（EPUB 自动走结构化分支） | page renders / `chapters.jsonl` + `media/` |
 | ① parse · vision read | `book_parse prompts <book>` prints shard briefs → spawn one Read-only agent per shard | shard JSONL files (Write to disk, never chat-only) |
-| ① parse · merge | `book_parse merge <book> --round A --dir <shards>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` |
-| ② outline | ⛔ human confirmation gate — no tool | confirmed tier plan |
-| ③–⑤ write & harvest | write 精读/摘要/章节 md；`book_parse crop <book>`（archive bbox → `img/` + 图录.json） | notes / chapter pages / figures |
+| ① parse · crop | `book_parse crop <book> --round A --dir <shards>`（merge 之前；regions → `book-parse/imgs/`，幂等） | per-page figure/table crops |
+| ① parse · merge | `book_parse merge <book> --round A --dir <shards>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` + `chapters/<章>/`（原文聚合＋图表 md 引用） |
+| ② distill | `book_parse distill <book>` prints per-chapter briefs → agents write 精读 notes | 精读/chapter-<NN>-*.md（每页必有提炼，无跳过） |
+| ③–⑤ write & archive | 章节页写作（基于精读与档案）；卡片 | chapter pages / cards |
 | ⑥ build & publish | `site/build_html.py` → `site/publish_web.sh`（missing figure = fail） | live site, then proxy-verify 200 |
 | audit (aux) | `pages_probe.py` pre-filter · overlay eyeball | flagged pages only |
 
@@ -86,18 +87,19 @@ directory that owns `books/` so relative paths resolve.
 - Acceptance: merge reports continuity; eyeball the bbox overlay of a few pages before
   calling the archive done.
 
-## ② Outline → ⛔ confirmation gate
+## ② Distill — every page, no skipping
 
-Propose a tiered reading plan (deep-read chapters / summarize / skip) + chapter outline.
-STOP. Do not write a single note until the user confirms the tiers.
+The user has not read the book; tier/skip decisions are not theirs to make. Distillation
+covers EVERY page: per chapter, write 精读 notes from chapter.md (verbatim quotes only,
+术语首现必释, each page ≥1 提炼, figure refs kept with one-line readings). Output to
+精读/chapter-<NN>-*.md.
 
-## ③④⑤ Close reading → archiving → cards
+## ③④⑤ Chapter pages → archiving → cards
 
-- Write 精读/摘要/chapter notes; every quotation is copied from the book-parse archive text.
-  If it is not in the archive, it may not be quoted — mark ⚠未验证 instead.
-- Figures: harvest via `book_parse crop` (archive bbox → img/ + 图录.json). A table with
-  embedded woodcuts yields ONE table frame — inner tiles are never individually boxed.
-  Chapter pages embed `img/<slug>-…`; a missing file blocks publish (strong linkage check).
+- Write 章节页 (chapter pages) from the 精读 notes; every quotation is copied from the
+  book-parse archive text. If it is not in the archive, it may not be quoted — mark ⚠未验证.
+- Figures were cropped pre-merge (book-parse/imgs/); chapter pages reference them via
+  the assembled links. A missing file blocks publish (strong linkage check).
 - Cards to cards/*.md with source + difficulty + review ladder.
 
 ## ⑥ Kanban & publish

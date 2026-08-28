@@ -17,9 +17,10 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
           ＋ imgs/（按 regions 裁剪；--no-crop 跳过裁图只出链接占位）
           （自动修复行内直引号；校验行数/连续性/字段完整性）
   chapters <书> [--offset N]  从档案解析目录→章名/起止页（merge 后自动跑；--offset 手动校正）
-  crop    <书> --round A [--slug fs1] [--type figure|table] [--pages 1,5-9] [--dry-run]
-          消费 round jsonl 的 regions：按框裁剪源 PDF 并登记 img/图录.json
-          （文件名 <slug>-glm-p<页>-<序>.jpg；--dry-run 只列将产出的裁剪不落盘）
+  crop    <书> --round A [--dir 目录] [--force] [--dpi 150]
+          合并前逐页裁剪：分片 regions → book-parse/imgs/p<页>-<序>.jpg（幂等，已存在跳过）
+  distill <书>
+          打印每章精读提炼的派工文本（每页都要提炼，无跳过；笔记落 精读/）
           页级漏报/误报（GT=图录有图页∪表页）＋区域 IoU（vs 图录 rect）
           抽验走 overlay 叠框图/人工抽页协议）
 
@@ -57,17 +58,31 @@ PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫
 
 交付：全部 {n} 行 JSONL 用 Write 工具写入 {outfile}，然后在最终回复里原样贴出这 {n} 行（双保险）。不要输出任何解释文字。"""
 
+def _root():
+    """仓库根自动探测：向上找含 sources/ 的目录（流水线可在根或 book-content/ 下执行）。"""
+    base = os.getcwd()
+    for _ in range(3):
+        if os.path.isdir(os.path.join(base, 'sources')):
+            return base
+        base = os.path.dirname(base)
+    sys.exit('未找到仓库根（含 sources/）——请在库根或 book-content/ 下执行')
+
 def book_root(book):
-    p = os.path.join('books', book)
-    if not os.path.isdir(p):
-        sys.exit('书目录不存在: ' + p)
-    return p
+    root = _root()
+    for cand in (os.path.join(root, 'book-content', 'books', book),
+                 os.path.join(root, 'books', book)):
+        if os.path.isdir(cand):
+            os.makedirs(cand, exist_ok=True)
+            return cand
+    os.makedirs(os.path.join(root, 'book-content', 'books', book), exist_ok=True)
+    return os.path.join(root, 'book-content', 'books', book)
 
 def find_pdf(book, override):
     if override:
         return override
+    root = _root()
     hits = []
-    for d, _, fs in os.walk(os.path.join('sources')):
+    for d, _, fs in os.walk(os.path.join(root, 'sources')):
         for fn in fs:
             if fn.lower().endswith(('.pdf', '.epub')) and book.split('-')[-1] in fn:
                 hits.append(os.path.join(d, fn))
@@ -205,6 +220,30 @@ def cmd_merge(a):
     chapters_out = assemble(a, broot, outdir, rows)
     if chapters_out is not None:
         print('  ↳ 章节组装：%d 个子章节 → %s/chapters/' % (chapters_out, outdir))
+        entries, off, unv = parse_chapters(rows, None)
+        with open(os.path.join(outdir, 'chapters.jsonl'), 'w', encoding='utf8') as w:
+            for e in entries:
+                w.write(json.dumps(e, ensure_ascii=False) + '\n')
+        print('  ↳ 章节表：%d 条（未确认 %d）' % (len(entries), len(unv)))
+
+def cmd_distill(a):
+    """每页精读提炼的派工文本：AI 逐章消化 chapter.md（原文+图表引用），产出精读笔记——无跳过、无定纲门。"""
+    broot = book_root(a.book)
+    cpath = os.path.join(broot, 'book-parse', 'chapters.jsonl')
+    if not os.path.exists(cpath):
+        sys.exit('章节表不存在: %s（先跑 merge）' % cpath)
+    chs = [json.loads(l) for l in open(cpath, encoding='utf8') if l.strip()]
+    brief = (
+        '=== 精读提炼总纲（随分片派工文本一同下发）===\n'
+        '任务：逐章精读提炼。对分配给你的每一章，读 chapter.md（原文逐页聚合＋图表引用），\n'
+        '产出该章精读笔记 md：Write 到 精读/chapter-<章序>-<标题>.md。\n'
+        '要求：①覆盖该章每一页——无跳过、无略字；②术语首现必释；③引文原样摘自 chapter.md 内的原文，不得改写；\n'
+        '④每页至少一条提炼（要点/存疑/联想任一）；⑤图表引用原样保留并各配一句解读；\n'
+        '⑥开头写明章名与书页区间。笔记正文不设上限，以不漏信息为准。')
+    print(brief)
+    for i, c in enumerate(chs, 1):
+        print('--- 章节派工 %02d：chapters/%02d-%s/chapter.md → 精读/chapter-%02d-%s.md'
+              % (i, i, _safe(c['title'])[:20], i, _safe(c['title'])[:20]))
 
 def parse_chapters(rows, offset=None):
     """从档案解析目录页→章名/起止页。返回 entries 列表（含 pdf 换算与页眉校验）。"""
@@ -311,9 +350,6 @@ def assemble(a, broot, outdir, rows):
             hi = (aligned[i + 1][1] - 1) if i + 1 < len(aligned) else max(bp)
             segs.append((t, lo, hi))
     # 按 书页区间 收 member 页（book_page 相等即归段；无书页页归前桶）
-    import fitz
-    pdf = find_pdf(a.book, a.pdf)
-    doc = fitz.open(pdf)
     os.makedirs(os.path.join(outdir, 'chapters'), exist_ok=True)
     made = 0
     used_pages = set()
@@ -330,17 +366,10 @@ def assemble(a, broot, outdir, rows):
         parts = ['# %s' % title, '', '书页 %d–%d · PDF p%s–p%s' % (lo, hi,
                  min(members) if members else '-', max(members) if members else '-'), '']
         figs = []
-        if not a.no_crop:
-            for p in members:
-                pw, ph = doc[p - 1].rect.width, doc[p - 1].rect.height
-                for k, rg in enumerate(rows[p].get('regions', []), 1):
-                    typ = rg[4] if len(rg) > 4 else 'figure'
-                    clip = fitz.Rect(rg[0] / 100 * pw, rg[1] / 100 * ph,
-                                     rg[2] / 100 * pw, rg[3] / 100 * ph)
-                    fn = 'imgs/p%03d-%d.jpg' % (p, k)
-                    pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.cropdpi, colorspace=fitz.csGRAY)
-                    pix.save(os.path.join(d, fn), jpg_quality=80)
-                    figs.append('![PDF p%d %s](%s)' % (p, typ, fn))
+        for p in members:
+            for k, rg in enumerate(rows[p].get('regions', []), 1):
+                typ = rg[4] if len(rg) > 4 else 'figure'
+                figs.append('![PDF p%d %s](../../imgs/p%03d-%d.jpg)' % (p, typ, p, k))
         for p in members:
             t = (rows[p].get('text') or '').replace('\\n', '\n')
             bp_ = bp.get(p)
@@ -352,7 +381,6 @@ def assemble(a, broot, outdir, rows):
             parts += [''] + figs + ['']
         open(os.path.join(d, 'chapter.md'), 'w', encoding='utf8').write('\n'.join(parts) + '\n')
         made += 1
-    doc.close()
     # 未归属页（前置/无书页）
     rest = [p for p in sorted(rows) if p not in used_pages]
     if rest:
@@ -386,67 +414,42 @@ def cmd_chapters(a):
 
 def cmd_crop(a):
     import fitz
+    """合并前的逐页裁剪：按分片档案的 regions 把每页图/表裁到 book-parse/imgs/（p<页>-<序>.jpg）。"
+    merge 组装章节时直接以相对路径引用这些文件；pages.jsonl 的 regions 就是清单，无需登记册。"""
     broot = book_root(a.book)
-    path = os.path.join(broot, 'glm-parse', 'round%s-all.jsonl' % a.round)
-    rows = {r['page']: r for r in map(json.loads, filter(str.strip, open(path, encoding='utf8')))}
-    man_path = os.path.join(broot, 'img', '图录.json')
-    figs = json.load(open(man_path)) if os.path.exists(man_path) else []
-    have = {e['file'] for e in figs}
+    shards = [f for f in sorted(glob.glob(os.path.join(a.dir, 'round%s-*.jsonl' % a.round)))
+              if '-all' not in os.path.basename(f)]
+    if not shards:
+        sys.exit('无分片: %s/round%s-*.jsonl' % (a.dir, a.round))
+    rows = {}
+    for sp in shards:
+        for line in open(sp, encoding='utf8'):
+            if line.strip():
+                r = json.loads(line); rows[r['page']] = r
     pdf = find_pdf(a.book, a.pdf)
     doc = fitz.open(pdf)
-    slug = a.slug or a.book.split('-')[-1]
-    want_pages = None
-    if a.pages:
-        want_pages = set()
-        for seg in a.pages.split(','):
-            if '-' in seg:
-                lo, hi = map(int, seg.split('-')); want_pages |= set(range(lo, hi + 1))
-            else:
-                want_pages.add(int(seg))
-    plan = []
+    outdir = os.path.join(broot, 'book-parse', 'imgs')
+    os.makedirs(outdir, exist_ok=True)
+    made = skipped = 0
     for p in sorted(rows):
-        if want_pages and p not in want_pages:
+        regs = rows[p].get('regions') or []
+        if not regs:
             continue
         pw, ph = doc[p - 1].rect.width, doc[p - 1].rect.height
-        k = 0
-        for rg in rows[p].get('regions', []):
-            x0, y0, x1, y1, typ = rg[0], rg[1], rg[2], rg[3], rg[4] if len(rg) > 4 else 'figure'
-            if a.type and typ != a.type:
-                continue
-            k += 1
-            fn = '%s-glm-p%03d-%d.jpg' % (slug, p, k)
-            plan.append((p, typ, (x0 / 100 * pw, y0 / 100 * ph, x1 / 100 * pw, y1 / 100 * ph), fn))
+        for k, rg in enumerate(regs, 1):
+            fn = os.path.join(outdir, 'p%03d-%d.jpg' % (p, k))
+            if os.path.exists(fn) and not a.force:
+                skipped += 1; continue
+            clip = fitz.Rect(rg[0] / 100 * pw, rg[1] / 100 * ph, rg[2] / 100 * pw, rg[3] / 100 * ph)
+            pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.dpi, colorspace=fitz.csGRAY)
+            pix.save(fn, jpg_quality=80)
+            made += 1
     doc.close()
-    print('计划裁剪 %d 项（round%s / type=%s / pages=%s）' % (len(plan), a.round, a.type or '全部', a.pages or '全部'))
-    if a.dry_run:
-        for p, typ, rect, fn in plan:
-            dup = ' [文件名已存在，将跳过]' if fn in have else ''
-            print('  p%-4d %-6s %s%s' % (p, typ, fn, dup))
-        return
-    import fitz as F
-    doc = F.open(pdf)
-    added = skipped = 0
-    for p, typ, rect, fn in plan:
-        if fn in have:
-            skipped += 1; continue
-        clip = F.Rect(*rect)
-        pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.dpi, colorspace=F.csGRAY)
-        out = os.path.join(broot, 'img', fn)
-        pix.save(out)
-        entry = {'file': fn, 'pdf': pdf, 'page': p,
-                 'rect': [round(v, 1) for v in rect], 'dpi': a.dpi,
-                 'caption': 'book_parse round%s p%d %s 区域裁剪' % (a.round, p, typ)}
-        figs = [e for e in figs if e.get('file') != fn] + [entry]
-        added += 1
-    doc.close()
-    json.dump(figs, open(man_path, 'w'), ensure_ascii=False, indent=1)
-    print('✓ 新增登记 %d 项，跳过已存在 %d 项 → 图录 %s（共 %d 条）' % (added, skipped, man_path, len(figs)))
-
-
+    print('✓ 逐页裁剪 %d 张（跳过已存在 %d）→ %s' % (made, skipped, outdir))
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('子命令：')[0])
-    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop'])
+    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop', 'distill'])
     ap.add_argument('book')
     ap.add_argument('--pdf'); ap.add_argument('--dpi', type=int, default=100)
     ap.add_argument('--workdir', default=None)
@@ -454,18 +457,14 @@ def main():
     ap.add_argument('--round', default='A')
     ap.add_argument('--out', default='/tmp/book_parse')
     ap.add_argument('--dir', default='/tmp/book_parse')
-    ap.add_argument('--slug', default=None)
-    ap.add_argument('--type', default=None, choices=[None, 'figure', 'table'])
     ap.add_argument('--pages', default=None)
-    ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--offset', type=int, default=None)
-    ap.add_argument('--cropdpi', type=int, default=150)
-    ap.add_argument('--no-crop', action='store_true')
+    ap.add_argument('--force', action='store_true')
     a = ap.parse_args()
     if a.workdir is None:
         a.workdir = '/tmp/book_parse_' + re.sub(r'[^\w]', '', a.book)
     {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge,
-     'chapters': cmd_chapters, 'crop': cmd_crop}[a.cmd](a)
+     'chapters': cmd_chapters, 'crop': cmd_crop, 'distill': cmd_distill}[a.cmd](a)
 
 if __name__ == '__main__':
     main()
