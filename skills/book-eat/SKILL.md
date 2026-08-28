@@ -1,12 +1,14 @@
 ---
 name: book-eat
-description: "Deep-digest a book into a permanent, page-cited knowledge base — the AI reads the whole book by direct vision (no OCR anywhere) and archives a per-page parse (figure/table presence + bbox + full text). Tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, figure harvesting driven by the archive's bboxes, and a resumable state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built."
+description: "Deep-digest a book into a permanent, page-cited knowledge base — text is taken from the source directly whenever present (text layer / structural unpack); vision reading is the fallback for scanned pages; every page is archived (figure/table presence + bbox + full text) (figure/table presence + bbox + full text). Tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, figure harvesting driven by the archive's bboxes, and a resumable state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built."
 ---
 
-# Book Eat v2 · vision-first pipeline (2026-08-28)
+# Book Eat v2 · extraction-first pipeline (2026-08-28)
 
-OCR is retired. The book's text AND page-layout truth is a per-page archive produced by
-direct multimodal reading (`tools/book_parse.py`, canonical PROMPT embedded — prompt
+Extraction first: the text comes from the source directly (text layer, structural
+unpack) whenever present; vision reading is reserved for scanned pages and for figure/table
+judgment. The per-page archive produced by `tools/book_parse.py` (canonical PROMPT embedded —
+prompt changes require user sign-off) is the truth for what each page contains. (`tools/book_parse.py`, canonical PROMPT embedded — prompt
 changes require user sign-off). Nothing else is a completeness witness.
 
 ## Library layout
@@ -38,16 +40,17 @@ html/                        generated site (build_html.py) — html/img staging
 | present | present | reading/publishing → ③–⑥ |
 | partially filled | any | interrupted merge → `book_parse merge` to resume |
 
-## ① Parse (full-book archive)
+## ① Parse (full-book archive) — extraction first, vision fallback
 
-- **Scanned PDF**: `book_parse render` (serial, dpi100) → `book_parse prompts` prints per-shard
-  agent briefs → spawn one Read-only agent per shard (each page: presence + bbox + full text
-  transcription) → `book_parse merge` (validates continuity/fields, auto-fixes quoting).
-- **Native PDF**: same, but body text comes from the text layer; the visual pass judges
-  figure/table presence & bboxes only.
-- **EPUB**: `book_parse render` unpacks structurally — chapter text from spine XHTML,
-  embedded media extracted whole to `book-parse/media/` (no page semantics; media anchor to
-  chapters). No visual transcription needed; optional visual pass on media on demand.
+| source | text | figure/table |
+|---|---|---|
+| **Native PDF** (text layer) | extract from the text layer directly | render pages → visual pass judges presence & bboxes |
+| **Scanned PDF** (no text layer) | vision transcription IS the text source | same visual pass |
+| **EPUB** | structural unpack: spine XHTML → chapter text | embedded media extracted whole to `book-parse/media/` (chapter-anchored, no page semantics) |
+
+- Scanned path: `book_parse render` (serial, dpi100) → `book_parse prompts` prints per-shard
+  agent briefs → one Read-only agent per shard (presence + bbox + full text) → `merge`
+  (validates continuity/fields).
 - Acceptance: merge reports continuity; eyeball the bbox overlay of a few pages before
   calling the archive done.
 
@@ -73,7 +76,7 @@ STOP. Do not write a single note until the user confirms the tiers.
 
 ## Hard rules
 
-- No OCR anywhere. No text-vs-OCR similarity metrics. OCR history stays deleted.
+- Extraction first, vision fallback (rule 1). No OCR tools anywhere; OCR history stays deleted.
 - One canonical PROMPT (inside book_parse.py). No A/B/C prompt rounds; no pixel-probe
   completeness claims. The archive is the only presence witness.
 - Absence claims ("no figures", "fully covered") are forbidden in notes — state what was
