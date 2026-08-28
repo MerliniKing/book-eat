@@ -12,8 +12,9 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
   prompts <书> [--workdir ...] [--shard 45] [--round A] [--out 目录]
           按正典 PROMPT 打印各分片派工文本（含页区间与交付文件名）
   merge   <书> --round A [--dir /tmp/book_parse]
-          校验并合并 round<A>-pa-*.jsonl 分片 → books/<书>/glm-parse/roundA-all.jsonl
+          校验并合并 round<A>-*.jsonl 分片 → books/<书>/book-parse/pages.jsonl（页况档案真相源）
           （自动修复行内直引号；校验行数/连续性/字段完整性）
+  chapters <书> [--offset N]  从档案解析目录→章名/起止页（merge 后自动跑；--offset 手动校正）
   crop    <书> --round A [--slug fs1] [--type figure|table] [--pages 1,5-9] [--dry-run]
           消费 round jsonl 的 regions：按框裁剪源 PDF 并登记 img/图录.json
           （文件名 <slug>-glm-p<页>-<序>.jpg；--dry-run 只列将产出的裁剪不落盘）
@@ -183,14 +184,90 @@ def cmd_merge(a):
     bad = [p for p in pages if not need <= set(rows[p])]
     if gaps or bad:
         sys.exit('分片不完整: 缺页 %s 坏行 %s' % (gaps[:10], bad[:10]))
-    outdir = os.path.join(broot, 'glm-parse')
+    outdir = os.path.join(broot, 'book-parse')
     os.makedirs(outdir, exist_ok=True)
-    out = os.path.join(outdir, 'round%s-all.jsonl' % a.round)
+    out = os.path.join(outdir, 'pages.jsonl')
     open(out, 'w', encoding='utf8').write(
         '\n'.join(json.dumps(rows[p], ensure_ascii=False) for p in pages) + '\n')
     nf = sum(rows[p]['has_figure'] for p in pages)
     nt = sum(rows[p]['has_table'] for p in pages)
     print('✓ %s（%d 页 %d-%d 连续）has_figure=%d has_table=%d' % (out, len(pages), pages[0], pages[-1], nf, nt))
+    try:
+        entries, off, _ = parse_chapters(rows, None)
+        cout = os.path.join(outdir, 'chapters.jsonl')
+        open(cout, 'w', encoding='utf8').write(
+            '\n'.join(json.dumps(e, ensure_ascii=False) for e in entries) + '\n')
+        ver = sum(1 for e in entries if e['verified'])
+        print('  ↳ 章节解析：%d 条 → %s（偏移=%s，页眉校验 %d/%d；细调用 book_parse chapters --offset）'
+              % (len(entries), cout, off, ver, len(entries)))
+    except Exception as e:
+        print('  ↳ 章节解析跳过：%s' % e)
+
+def parse_chapters(rows, offset=None):
+    """从档案解析目录页→章名/起止页。返回 entries 列表（含 pdf 换算与页眉校验）。"""
+    toc_texts = []
+    for p in sorted(rows):
+        t = (rows[p].get('text') or '').strip()
+        if not t:
+            continue
+        pairs = re.findall(r'([\u4e00-\u9fff《》〔〕][^0-9\n]{1,40}?)\s?(\d{1,3})(?=\s|$)', t)
+        if re.search(r'目\s*录', t[:24]) or len(pairs) >= 6:
+            toc_texts.append((p, t))
+    entries = []
+    for p, t in toc_texts:
+        t = re.sub(r'^.*?目\s*录', '', t, count=1, flags=re.S) if re.search(r'目\s*录', t[:24]) else t
+        for m in re.finditer(r'([\u4e00-\u9fff《》〔〕][^0-9\n]{1,40}?)\s?(\d{1,3})(?=\s|$)', t):
+            title = re.sub(r'\s', '', m.group(1))
+            if len(title) >= 2:
+                entries.append({'title': title, 'print_page': int(m.group(2)), 'toc_page': p})
+    # 去重（跨目录页重复项）并保持单调
+    seen, mono = set(), []
+    last = 0
+    for e in entries:
+        key = (e['title'], e['print_page'])
+        if key in seen or e['print_page'] < last:
+            continue
+        seen.add(key); mono.append(e); last = e['print_page']
+    entries = mono
+    # 偏移自动探测：对 0..40 逐个试，取“章首页含章名前4字”的命中数最大者
+    def score(off):
+        hit = 0
+        for e in entries:
+            pg = e['print_page'] + off
+            t = rows.get(pg, {}).get('text', '')
+            if t and e['title'][:4] in t.replace(' ', ''):
+                hit += 1
+        return hit
+    if offset is None:
+        best = max(range(0, 41), key=score)
+        if score(best) == 0:
+            return entries, None, 0
+        offset = best
+    for e in entries:
+        e['pdf_page'] = e['print_page'] + offset
+        t = rows.get(e['pdf_page'], {}).get('text', '').replace(' ', '')
+        e['verified'] = bool(t) and e['title'][:4] in t
+    for i, e in enumerate(entries):
+        nxt = entries[i + 1]['pdf_page'] if i + 1 < len(entries) else max(rows) + 1
+        e['end_pdf_page'] = max(e['pdf_page'], nxt - 1)
+    return entries, offset, 0
+
+def cmd_chapters(a):
+    broot = book_root(a.book)
+    path = os.path.join(broot, 'book-parse', 'pages.jsonl')
+    if not os.path.exists(path):
+        sys.exit('档案不存在: %s（先跑 merge）' % path)
+    rows = {r['page']: r for r in map(json.loads, filter(str.strip, open(path, encoding='utf8')))}
+    entries, off, _ = parse_chapters(rows, a.offset)
+    out = os.path.join(broot, 'book-parse', 'chapters.jsonl')
+    open(out, 'w', encoding='utf8').write(
+        '\n'.join(json.dumps(e, ensure_ascii=False) for e in entries) + '\n')
+    verified = sum(1 for e in entries if e['verified'])
+    print('✓ %s（%d 章，偏移=%s，页眉校验通过 %d/%d）' % (out, len(entries), off, verified, len(entries)))
+    for e in entries:
+        mark = '✓' if e['verified'] else '?'
+        print('  p%-4d-%-4d %s %s' % (e['pdf_page'], e['end_pdf_page'], mark, e['title']))
+
 
 def cmd_crop(a):
     import fitz
@@ -254,7 +331,7 @@ def cmd_crop(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('子命令：')[0])
-    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'crop'])
+    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop'])
     ap.add_argument('book')
     ap.add_argument('--pdf'); ap.add_argument('--dpi', type=int, default=100)
     ap.add_argument('--workdir', default=None)
@@ -266,10 +343,12 @@ def main():
     ap.add_argument('--type', default=None, choices=[None, 'figure', 'table'])
     ap.add_argument('--pages', default=None)
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--offset', type=int, default=None)
     a = ap.parse_args()
     if a.workdir is None:
         a.workdir = '/tmp/book_parse_' + re.sub(r'[^\w]', '', a.book)
-    {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge, 'crop': cmd_crop}[a.cmd](a)
+    {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge,
+     'chapters': cmd_chapters, 'crop': cmd_crop}[a.cmd](a)
 
 if __name__ == '__main__':
     main()
