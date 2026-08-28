@@ -39,9 +39,10 @@ tools/                       book_parse 等流水线工具
 |---|---|---|
 | ① 解析 · 渲染 | `book_parse render <书> [--pdf 源]`（EPUB 自动走结构化分支） | 页图 / `chapters.jsonl` + `media/` |
 | ① 解析 · 派读 | `book_parse prompts <书>` 打印分片派工文本 → 每片派一个只读 Agent | 分片 JSONL（必须写盘，不许只贴对话） |
-| ① 解析 · 合并 | `book_parse merge <书> --round A --dir <分片目录>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` |
-| ② 定纲 | ⛔ 人工确认门——无工具 | 确认的分级方案 |
-| ③–⑤ 写作与收割 | 写精读/摘要/章节 md；`book_parse crop <书>`（档案 bbox → `img/` + 图录.json） | 笔记 / 章节页 / 图片 |
+| ① 解析 · 裁图 | `book_parse crop <书> --round A --dir <分片目录>`（merge 之前；regions → `book-parse/imgs/`，幂等） | 逐页图/表裁片 |
+| ① 解析 · 合并 | `book_parse merge <书> --round A --dir <分片目录>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` + `chapters/<章>/`（原文聚合＋图表 md 引用） |
+| ② 精读提炼 | `book_parse distill <书>` 打印逐章派工文本 → Agent 写精读笔记 | 精读/chapter-<NN>-*.md（每页必有提炼，无跳过） |
+| ③–⑤ 章节页与卡片 | 写章节页（基于精读与档案）；卡片 | 章节页 / cards |
 | ⑥ 构建发布 | `site/build_html.py` → `site/publish_web.sh`（缺图即失败） | 线上站点＋代理验证 200 |
 | 审计（辅助） | `pages_probe.py` 预筛 · 叠框图人验 | 仅标记可疑页 |
 
@@ -64,14 +65,16 @@ tools/                       book_parse 等流水线工具
 
 扫描路径：`book_parse render`（串行 dpi100）→ `prompts` 打印分片派工文本 → 每片一个只读 Agent（逐页：有无+bbox+全文）→ `merge`（校验连续性/字段、修引号）。正典 PROMPT 内嵌于 book_parse.py，改动须经用户确认。
 
-## ② 定纲 → ⛔ 确认门
+## ② 精读提炼——每一页都要，无跳过
 
-提出分级方案（精读/摘要/跳过）＋章节切分建议。**停下等用户确认分级**，未确认不写一个字。
+用户没读过书，"跳过哪些"不该由用户预判。提炼覆盖每一页：按章写精读笔记
+（引文原样摘自 chapter.md；术语首现必释；每页至少一条提炼；图表引用保留并各配解读），
+产出 精读/chapter-<NN>-*.md。
 
-## ③④⑤ 精读 → 归档 → 卡片
+## ③④⑤ 章节页 → 归档 → 卡片
 
-- 引文一律从 book-parse 档案全文复制；档案里没有的段落不得引用，标 ⚠未验证
-- 图片：`book_parse crop` 按档案 bbox 收割（表格含内嵌小图只给一组 table 坐标）；章节页引用 `img/<slug>-…`，缺图＝发布失败（强校验，是门不是故障）
+- 章节页基于精读笔记写作；引文一律从 book-parse 档案全文复制；档案里没有的段落不得引用，标 ⚠未验证
+- 图表已在合并前裁好（book-parse/imgs/），章节页按组装出的引用链接取用；缺图＝发布失败（强校验，是门不是故障）
 - 卡片入 cards/*.md，带出处+难度+复习梯
 
 ## ⑥ 看板与发布
