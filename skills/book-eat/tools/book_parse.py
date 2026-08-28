@@ -35,8 +35,8 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
 import argparse, glob, json, os, re, sys
 
 PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫描图 pNNN.png。用 Read 工具逐张查看 {lo_png} 至 {hi_png}，为每页输出一行 JSON：
-{{"page":N,"has_figure":布尔,"has_table":布尔,"regions":[[x0,y0,x1,y1,"figure"或"table"]],"text":"…"}，并附加三个字段：
-{"page":N,"book_page":本页印刷页码或null,"is_toc":布尔,"toc":[{"title":"章节名","book_page":起始书页}],
+{{"page":N,"has_figure":布尔,"has_table":布尔,"regions":[[x0,y0,x1,y1,"figure"或"table"]],"text":"…"}}，并附加三个字段：
+{{"page":N,"book_page":本页印刷页码或null,"is_toc":布尔,"toc":[{{"title":"章节名","book_page":起始书页}}],
  "has_figure":布尔,"has_table":布尔,"regions":[…],"text":"…"}}
 
 示例——假如某页上半是一张带边框的「历代纪元表」、中间一段正文、下方一幅无框山水示意图，理想输出是：
@@ -46,7 +46,7 @@ PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫
 新增字段规则：
 0a. book_page：判断当前页面左下角/右下角是否印有图书页号（数字），有则输出该页号；没有则 null
 0b. is_toc：本页是否为目录页（列出"章节名+起始书页"清单的页面）
-0c. toc：仅当 is_toc=true 时输出结构化目录——按目录原顺序，每条 {"title":"章节名原文","book_page":该章起始书页}；is_toc=false 时为 []
+0c. toc：仅当 is_toc=true 时输出结构化目录——按目录原顺序，每条 {{"title":"章节名原文","book_page":该章起始书页}}；is_toc=false 时为 []
 
 判定规则：
 1. has_table=true 当且仅当页面存在由边框线/行列分隔线构成的表格结构
@@ -170,7 +170,7 @@ def cmd_prompts(a):
     i = 1
     while i <= n:
         hi = min(i + a.shard - 1, n)
-        name = '%s-pa-%s.jsonl' % (a.round.lower(), chr(ord('a') + (i - 1) // a.shard))
+        name = 'round%s-pa-%s.jsonl' % (a.round, chr(ord('a') + (i - 1) // a.shard))
         out = os.path.join(a.out, name)
         print('=== 分片 %s（p%d–%d）→ 交付 %s' % (chr(ord('a') + (i - 1) // a.shard).upper(), i, hi, out))
         print(PROMPT.format(workdir=a.workdir, lo_png='p%03d.png' % i, hi_png='p%03d.png' % hi,
