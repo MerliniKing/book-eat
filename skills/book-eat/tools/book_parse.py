@@ -11,8 +11,10 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
           渲染全书页码图（单一进程串行，遵守低占铁律）
   prompts <书> [--workdir ...] [--shard 45] [--round A] [--out 目录]
           按正典 PROMPT 打印各分片派工文本（含页区间与交付文件名）
-  merge   <书> --round A [--dir /tmp/book_parse]
-          校验并合并 round<A>-*.jsonl 分片 → books/<书>/book-parse/pages.jsonl（页况档案真相源）
+  merge   <书> --round A [--dir /tmp/book_parse] [--cropdpi 150] [--no-crop]
+          合并分片 → pages.jsonl（页况档案）；随后按书页号对齐目录条目，
+          组装章节目录树：book-parse/chapters/<序>-<章名>/chapter.md（正文＋图/表 md 引用）
+          ＋ imgs/（按 regions 裁剪；--no-crop 跳过裁图只出链接占位）
           （自动修复行内直引号；校验行数/连续性/字段完整性）
   chapters <书> [--offset N]  从档案解析目录→章名/起止页（merge 后自动跑；--offset 手动校正）
   crop    <书> --round A [--slug fs1] [--type figure|table] [--pages 1,5-9] [--dry-run]
@@ -32,11 +34,18 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
 import argparse, glob, json, os, re, sys
 
 PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫描图 pNNN.png。用 Read 工具逐张查看 {lo_png} 至 {hi_png}，为每页输出一行 JSON：
-{{"page":N,"has_figure":布尔,"has_table":布尔,"regions":[[x0,y0,x1,y1,"figure"或"table"]],"text":"…"}}
+{{"page":N,"has_figure":布尔,"has_table":布尔,"regions":[[x0,y0,x1,y1,"figure"或"table"]],"text":"…"}，并附加三个字段：
+{"page":N,"book_page":本页印刷页码或null,"is_toc":布尔,"toc":[{"title":"章节名","book_page":起始书页}],
+ "has_figure":布尔,"has_table":布尔,"regions":[…],"text":"…"}}
 
 示例——假如某页上半是一张带边框的「历代纪元表」、中间一段正文、下方一幅无框山水示意图，理想输出是：
 {{"page":57,"has_figure":true,"has_table":true,"regions":[[8,10,92,40,"table"],[12,55,88,82,"figure"]],"text":"…正文自表格之后抄起…"}}
 要点：表格框含边框整体；示意图连同它下方那行题注一起框；text 只抄正文文字，表格里和图里的字不抄。
+
+新增字段规则：
+0a. book_page：判断当前页面左下角/右下角是否印有图书页号（数字），有则输出该页号；没有则 null
+0b. is_toc：本页是否为目录页（列出"章节名+起始书页"清单的页面）
+0c. toc：仅当 is_toc=true 时输出结构化目录——按目录原顺序，每条 {"title":"章节名原文","book_page":该章起始书页}；is_toc=false 时为 []
 
 判定规则：
 1. has_table=true 当且仅当页面存在由边框线/行列分隔线构成的表格结构
@@ -192,16 +201,10 @@ def cmd_merge(a):
     nf = sum(rows[p]['has_figure'] for p in pages)
     nt = sum(rows[p]['has_table'] for p in pages)
     print('✓ %s（%d 页 %d-%d 连续）has_figure=%d has_table=%d' % (out, len(pages), pages[0], pages[-1], nf, nt))
-    try:
-        entries, off, _ = parse_chapters(rows, None)
-        cout = os.path.join(outdir, 'chapters.jsonl')
-        open(cout, 'w', encoding='utf8').write(
-            '\n'.join(json.dumps(e, ensure_ascii=False) for e in entries) + '\n')
-        ver = sum(1 for e in entries if e['verified'])
-        print('  ↳ 章节解析：%d 条 → %s（偏移=%s，页眉校验 %d/%d；细调用 book_parse chapters --offset）'
-              % (len(entries), cout, off, ver, len(entries)))
-    except Exception as e:
-        print('  ↳ 章节解析跳过：%s' % e)
+    # ── 组装器：以书页号为对齐键，汇总章节文本＋裁图＋md 引用 ──
+    chapters_out = assemble(a, broot, outdir, rows)
+    if chapters_out is not None:
+        print('  ↳ 章节组装：%d 个子章节 → %s/chapters/' % (chapters_out, outdir))
 
 def parse_chapters(rows, offset=None):
     """从档案解析目录页→章名/起止页。返回 entries 列表（含 pdf 换算与页眉校验）。"""
@@ -243,14 +246,125 @@ def parse_chapters(rows, offset=None):
         if score(best) == 0:
             return entries, None, 0
         offset = best
+    # 硬性确认：目录+偏移只是提议；章名必须出现在目标页（或±1页）的文字识别结果里
+    #   ——命中即吸附到实际页；±1 窗口仍找不到则标 unverified（不参与边界推导）
+    unverified = []
     for e in entries:
-        e['pdf_page'] = e['print_page'] + offset
-        t = rows.get(e['pdf_page'], {}).get('text', '').replace(' ', '')
-        e['verified'] = bool(t) and e['title'][:4] in t
+        want = re.sub(r'[\s·：:—－、.。]', '', e['title'])[:4]
+        hit = None
+        for dp in (0, -1, 1):
+            pg = e['print_page'] + offset + dp
+            t = re.sub(r'[\s·：:—－、.。]', '', rows.get(pg, {}).get('text', ''))
+            if t and want in t:
+                hit = pg; break
+            if t and want[:2] in t:   # 二级宽松：页面用短题（如「内形：配置」vs 目录全称）
+                hit = pg; e['loose'] = True; break
+        e['pdf_page'] = hit if hit else e['print_page'] + offset
+        e['verified'] = hit is not None
+        if not e['verified']:
+            unverified.append(e['title'])
+    entries = [e for e in entries if e['verified']] or entries
     for i, e in enumerate(entries):
         nxt = entries[i + 1]['pdf_page'] if i + 1 < len(entries) else max(rows) + 1
         e['end_pdf_page'] = max(e['pdf_page'], nxt - 1)
-    return entries, offset, 0
+    return entries, offset, unverified
+
+def _safe(name):
+    return re.sub(r'[\\/:*?"<>|\s]+', '', name)[:40] or 'untitled'
+
+def assemble(a, broot, outdir, rows):
+    """以书页号为对齐键：目录条目 → 章节区间 → 文本汇总 + regions 裁图 + 章节草稿 md。"""
+    toc = []
+    for p in sorted(rows):
+        r = rows[p]
+        if r.get('is_toc'):
+            for e in r.get('toc') or []:
+                if e.get('title') and isinstance(e.get('book_page'), int):
+                    toc.append((p, e['title'], e['book_page']))
+    bp = {p: r.get('book_page') for p, r in rows.items() if isinstance(r.get('book_page'), int)}
+    aligned = None
+    if len(toc) >= 2 and len(bp) >= 2:
+        # 对齐校验：目录宣称的书页号应能在 bp 中找到（同号即对上）
+        bps = set(bp.values())
+        toc2 = [(tp, t, bp_) for tp, t, bp_ in toc if bp_ in bps]
+        if len(toc2) >= 2:
+            toc2 = sorted({(t, bp_) for _, t, bp_ in toc2}, key=lambda x: x[1])
+            aligned = [(t, b_) for t, b_ in toc2]
+    if aligned is None:                     # 旧档案无 book_page 字段 → 用目录解析的已校准 pdf 页
+        entries, off, unv = parse_chapters(rows, None)
+        if not entries:
+            print('  ↳ 组装跳过：目录与书页号均不可用'); return None
+        aligned = [(e['title'], e['pdf_page']) for e in entries if e['verified']]
+        segs = []
+        for i, (t, lo) in enumerate(aligned):
+            hi = (aligned[i + 1][1] - 1) if i + 1 < len(aligned) else max(rows)
+            segs.append((t, lo, hi))
+        b2p = {}
+        for i, (t, lo, hi) in enumerate(segs, 1):
+            pass
+    else:
+        segs = []
+        b2p = {}
+        for p, b in sorted(bp.items()): b2p.setdefault(b, p)
+        for i, (t, b) in enumerate(aligned):
+            lo = b
+            hi = (aligned[i + 1][1] - 1) if i + 1 < len(aligned) else max(bp)
+            segs.append((t, lo, hi))
+    # 按 书页区间 收 member 页（book_page 相等即归段；无书页页归前桶）
+    import fitz
+    pdf = find_pdf(a.book, a.pdf)
+    doc = fitz.open(pdf)
+    os.makedirs(os.path.join(outdir, 'chapters'), exist_ok=True)
+    made = 0
+    used_pages = set()
+    for i, (title, lo, hi) in enumerate(segs, 1):
+        members = [p for p in sorted(rows) if p not in used_pages
+                   and bp.get(p) is not None and lo <= bp[p] <= hi]
+        if not members:
+            members = [p for p in sorted(rows)
+                       if p not in used_pages and (lo - 0) <= p <= hi]
+        if members:
+            used_pages |= set(members)
+        d = os.path.join(outdir, 'chapters', '%02d-%s' % (i, _safe(title)))
+        os.makedirs(os.path.join(d, 'imgs'), exist_ok=True)
+        parts = ['# %s' % title, '', '书页 %d–%d · PDF p%s–p%s' % (lo, hi,
+                 min(members) if members else '-', max(members) if members else '-'), '']
+        figs = []
+        if not a.no_crop:
+            for p in members:
+                pw, ph = doc[p - 1].rect.width, doc[p - 1].rect.height
+                for k, rg in enumerate(rows[p].get('regions', []), 1):
+                    typ = rg[4] if len(rg) > 4 else 'figure'
+                    clip = fitz.Rect(rg[0] / 100 * pw, rg[1] / 100 * ph,
+                                     rg[2] / 100 * pw, rg[3] / 100 * ph)
+                    fn = 'imgs/p%03d-%d.jpg' % (p, k)
+                    pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.cropdpi, colorspace=fitz.csGRAY)
+                    pix.save(os.path.join(d, fn), jpg_quality=80)
+                    figs.append('![PDF p%d %s](%s)' % (p, typ, fn))
+        for p in members:
+            t = (rows[p].get('text') or '').replace('\\n', '\n')
+            bp_ = bp.get(p)
+            parts.append('<!-- PDF p%d · 书页 %s -->' % (p, bp_ if bp_ is not None else '?'))
+            if t: parts.append(t)
+            parts.append('')
+        if figs:
+            parts.append('## 图表')
+            parts += [''] + figs + ['']
+        open(os.path.join(d, 'chapter.md'), 'w', encoding='utf8').write('\n'.join(parts) + '\n')
+        made += 1
+    doc.close()
+    # 未归属页（前置/无书页）
+    rest = [p for p in sorted(rows) if p not in used_pages]
+    if rest:
+        d = os.path.join(outdir, 'chapters', '00-前置与未归属')
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'chapter.md'), 'w', encoding='utf8') as w:
+            w.write('# 前置与未归属\n')
+            for p in rest:
+                w.write('\n<!-- PDF p%d -->\n%s\n' % (p, rows[p].get('text') or ''))
+        print('  ↳ 未归属页 %d → 00-前置与未归属' % len(rest))
+    return made
+
 
 def cmd_chapters(a):
     broot = book_root(a.book)
@@ -258,14 +372,15 @@ def cmd_chapters(a):
     if not os.path.exists(path):
         sys.exit('档案不存在: %s（先跑 merge）' % path)
     rows = {r['page']: r for r in map(json.loads, filter(str.strip, open(path, encoding='utf8')))}
-    entries, off, _ = parse_chapters(rows, a.offset)
+    entries, off, unv = parse_chapters(rows, a.offset)
     out = os.path.join(broot, 'book-parse', 'chapters.jsonl')
     open(out, 'w', encoding='utf8').write(
         '\n'.join(json.dumps(e, ensure_ascii=False) for e in entries) + '\n')
-    verified = sum(1 for e in entries if e['verified'])
-    print('✓ %s（%d 章，偏移=%s，页眉校验通过 %d/%d）' % (out, len(entries), off, verified, len(entries)))
+    ok = len(entries) - len(unv)
+    print('✓ %s（%d 章；目标页文字比对确认 %d，未确认 %d：%s）'
+          % (out, len(entries), ok, len(unv), '、'.join(unv[:6])))
     for e in entries:
-        mark = '✓' if e['verified'] else '?'
+        mark = '✓' if e['verified'] else '?未确认'
         print('  p%-4d-%-4d %s %s' % (e['pdf_page'], e['end_pdf_page'], mark, e['title']))
 
 
@@ -344,6 +459,8 @@ def main():
     ap.add_argument('--pages', default=None)
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--offset', type=int, default=None)
+    ap.add_argument('--cropdpi', type=int, default=150)
+    ap.add_argument('--no-crop', action='store_true')
     a = ap.parse_args()
     if a.workdir is None:
         a.workdir = '/tmp/book_parse_' + re.sub(r'[^\w]', '', a.book)
