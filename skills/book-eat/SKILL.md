@@ -1,123 +1,95 @@
 ---
 name: book-eat
-description: "Deep-digest a book into a permanent, page-cited knowledge base — the AI reads the whole book so you learn from distilled notes instead of raw text. Full-text caching (text-layer extraction or OCR for scanned PDFs), tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, and a resumable six-step state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built. Triggers: book digest, ingest book, deep reading, book summary, knowledge base, book notes."
+description: "Deep-digest a book into a permanent, page-cited knowledge base — the AI reads the whole book by direct vision (no OCR anywhere) and archives a per-page parse (figure/table presence + bbox + full text). Tiered close reading (deep notes + summaries behind an outline confirmation gate), topic archiving, glossary building, spaced-repetition review cards, figure harvesting driven by the archive's bboxes, and a resumable state machine. Use when the user says 'eat this book' / 'process this book', drops a new PDF/EPUB into sources/, asks to resume or check a book's processing status, or wants structured book notes built."
 ---
 
-# book-eat · Digest a Book
+# Book Eat v2 · vision-first pipeline (2026-08-28)
 
-Six-step pipeline orchestrator: ① full-text cache → ② outline → ③ close reading → ④ archiving → ⑤ cards → ⑥ kanban & publish.
-**Reentrant state machine**: any later invocation on the same book resumes from the breakpoint — never redoes finished work.
-Working directory: always the **library root** (the repository that owns `sources/`).
+OCR is retired. The book's text AND page-layout truth is a per-page archive produced by
+direct multimodal reading (`tools/book_parse.py`, canonical PROMPT embedded — prompt
+changes require user sign-off). Nothing else is a completeness witness.
 
-## Library layout & bootstrap
-
-Expected layout (created automatically in Step 0 if missing):
+## Library layout
 
 ```
-sources/            drop new books here (.pdf / .epub)
-books/<book>/ocr/   pages/  full.txt  toc.txt  quality_report.txt   ← raw machine layer, never rewritten
-books/<book>/       README.md (outline & tiering), deep notes, summaries
-topics/<area>/      topic notes — area dirs are created on demand, never pre-set
-cards/              review cards (Q/A)
-INDEX.md            progress kanban
-READER.md           optional reader-taste profile — governs all note/card output style (see ③④⑤)
+sources/                     book files (PDF/EPUB) — local only, gitignored
+books/<book>/
+  book-parse/                TRUTH SOURCE (per-page or per-chapter archive)
+    pages.jsonl              PDF: {page, has_figure, has_table, regions[bbox%], text}
+    chapters.jsonl           EPUB: {chapter, href, title, text, media[]}
+    media/                   EPUB embedded media (extracted, unregistered until harvest)
+  img/                       cropped figures actually harvested (+ 图录.json manifest)
+  精读-*.md 摘要-*.md lesson-*.md README.md 学习进度.md
+html/                        generated site (build_html.py) — html/img staging is ABOLISHED;
+                             publish resolves each src="img/…" directly from books/<book>/img/
 ```
 
-Bootstrap rules (Step 0, before anything else):
-- `tools/run_ocr.py` (extraction) or `tools/quote_check.py` / `tools/check_source.py` (verification gates) missing at library root → copy them from this skill's `tools/` directory
-- `sources/ books/ cards/ topics/` or `INDEX.md` missing → create them; seed `INDEX.md` from `scaffold/INDEX-template.md`
-- library `CLAUDE.md` missing the knowledge spec → append `scaffold/CLAUDE-snippet.md`
+## Tools
+
+`tools/book_parse.py` — render / prompts / merge / crop
+`tools/build_html.py`, `tools/publish_web.sh` — site build & publish (missing figure = publish fails; that is a guard, not a bug)
 
 ## Step 0 · State detection (every invocation)
 
-| Current state | Next |
-|---|---|
-| `sources/` has a new book (.pdf/.epub) and `books/` has no directory for it | Phase ① |
-| `books/<book>/ocr/full.txt` missing or incomplete | resume ① |
-| no `books/<book>/README.md` (outline) | Phase ② |
-| outline exists but the tiering table was never confirmed by the user | **⛔ confirmation gate** |
-| deep/summary notes incomplete (vs tiering table) | Phases ③④⑤ |
-| pipeline all green but `html/` not republished | Phase ⑥ |
+| books/<book>/book-parse/ | books/<book>/lesson-*.md | state |
+|---|---|---|
+| absent | absent | fresh → ① |
+| present | absent | parsed → ② outline gate |
+| present | present | reading/publishing → ③–⑥ |
+| partially filled | any | interrupted merge → `book_parse merge` to resume |
 
-Multiple books present or title ambiguous → list `sources/` and the INDEX kanban, let the user choose.
+## ① Parse (full-book archive)
 
-## ① Full-text cache
-
-```bash
-timeout 480 python3 tools/run_ocr.py <book-name> sources/<pdf-or-epub>   # rerun until it prints DONE
-```
-
-- Supports **.pdf / .epub** only; other formats (mobi/azw3/djvu…) are rejected with a clear error → convert to epub/pdf first
-- Auto-detection: text layer present → direct extraction (seconds); otherwise RapidOCR (~8 s/page; EPUB synthetic pages follow the same path)
-- **Long background tasks get killed (~10 min on some hosts): always run in `timeout` chunks** — resumable, finished pages are skipped automatically
-- Artifacts: `pages/` per-page text, `full.txt` with page markers, `toc.txt` (TOC → start page; junk bookmarks auto-discarded), `quality_report.txt` (OCR path only)
-- Page markers: `===== PDF page N =====` / `===== EPUB page N · <chapter> =====` (EPUB synthetic page numbers are deterministic per book)
-- When done, read `quality_report.txt` → flag low-confidence pages as visual-verification candidates
-- **Source-completeness gate (both paths, before ②)**: `python3 tools/check_source.py books/<book>/ocr/full.txt` — catches NUL-polluted text layers and **heading-only pages** (a text-layer EPUB can drop an entire chapter body silently; every quotation from that chapter is then unsourced without anyone noticing). Resolve each ⚠ before outlining: benign thin page (front matter, figure-only) → note it in the book README; real missing chapter → register the defect in the README and treat its content as unsourced from here on
+- **Scanned PDF**: `book_parse render` (serial, dpi100) → `book_parse prompts` prints per-shard
+  agent briefs → spawn one Read-only agent per shard (each page: presence + bbox + full text
+  transcription) → `book_parse merge` (validates continuity/fields, auto-fixes quoting).
+- **Native PDF**: same, but body text comes from the text layer; the visual pass judges
+  figure/table presence & bboxes only.
+- **EPUB**: `book_parse render` unpacks structurally — chapter text from spine XHTML,
+  embedded media extracted whole to `book-parse/media/` (no page semantics; media anchor to
+  chapters). No visual transcription needed; optional visual pass on media on demand.
+- Acceptance: merge reports continuity; eyeball the bbox overlay of a few pages before
+  calling the archive done.
 
 ## ② Outline → ⛔ confirmation gate
 
-1. Skim `full.txt` in chunks (with `toc.txt`); classify the book: modern → tiered processing / classic (ancient text) → four-layer annotation
-2. Write `books/<book>/README.md`: metadata, whole-book outline, **chapter tiering table** (deep-read core / summary / skip), relation to the library's roadmap if one exists
-3. Update the INDEX kanban for ①② → commit + push
-4. **⛔ REQUIRED STOP: present the tiering table to the user and explicitly wait for confirmation or adjustment. Without it, phases ③④⑤⑥ are forbidden.**
-
-> Why stop: tiering is an editorial judgment that determines all downstream work; getting it wrong means redoing everything.
->
-> | Routine excuse | Reality |
->---|---|
-> | "the convention implies it, no need to ask" | how many deep notes and which chapters to skip cannot be derived from convention — it is an editorial call |
-> | "interrupting once isn't worth it" | one interruption buys direction approval for the whole book — cheapest insurance there is |
-> | "finish first, review together" | finishing means the entire token budget and commit history are already spent; rework is the most expensive outcome |
+Propose a tiered reading plan (deep-read chapters / summarize / skip) + lesson outline.
+STOP. Do not write a single note until the user confirms the tiers.
 
 ## ③④⑤ Close reading → archiving → cards
 
-- Produce `deep-NN` / `summary-NN` notes **strictly per the confirmed tiering table**; for large books across sessions, commit+push and update INDEX after every 1–2 notes
-- **Reader-taste alignment (optional)**: the library root may carry a `READER.md` (reader-taste profile — how this reader reads, endorsed output patterns, the file's own revision rules). If present, read it before writing any note/card and follow its output preferences; style-direction feedback from sessions goes back into that file per its own revision rules
-- **Quality gate (write-side, binding)**:
-  - *Before writing*: quotations are **copied from `ocr/full.txt`, never typed from memory**. A passage you cannot find in the cache does not exist for citation purposes — either locate it in the cache or write it as general knowledge with **⚠unverified**
-  - *After writing, before commit*: `python3 tools/quote_check.py books/<book>/ocr/full.txt <note files...>` — every MISS must be resolved on the spot, one of: OCR/variant noise (open the page and confirm), translated quote (foreign-language books: verify the rendering against the original), or **⚠unverified** with reason. Never commit with unresolved misses
-  - *Read-side, where the cache is suspect*: low-confidence pages from `quality_report.txt`, woodblock-printed classics, tables and plates → verify against the original page image; an image-capable tool (vision MCP etc.) → check the page images directly; none → emit the quotation/low-confidence page list marked **⚠ needs human review** — never silently skip
-  - factual data (dates/names/editions/counts) follows the same rule: cache first, page image when the cache is suspect, ⚠ otherwise
-- Archive into the matching `topics/<area>/`, backfill book evidence (upgrade `⚠unverified` → verified), extend the glossary, create cards in `cards/` (with difficulty 1–5)
+- Write 精读/摘要/lesson notes; every quotation is copied from the book-parse archive text.
+  If it is not in the archive, it may not be quoted — mark ⚠未验证 instead.
+- Figures: harvest via `book_parse crop` (archive bbox → img/ + 图录.json). A table with
+  embedded woodcuts yields ONE table frame — inner tiles are never individually boxed.
+  Lesson embeds `img/<slug>-…`; a missing file blocks publish (strong linkage check).
+- Cards to cards/*.md with source + difficulty + review ladder.
 
-## ⑥ Kanban & optional publish
+## ⑥ Kanban & publish
 
-- Run the unified auditor once before declaring green: `python3 tools/audit_library.py` (in the library root) — source integrity + quotation backtrace over all notes/cards + figure-coverage suspects + card-coverage listing, one markdown report
-- INDEX all green means: every auditor finding carries a recorded attribution (OCR noise opened-and-confirmed / translation checked / ⚠unverified with reason / waiver annotated 已核); every book with deep-read notes resolves to a card file (produce cards or a written waiver in the book README) → commit + push
-- Publishing (optional, **library-defined**): if the library root provides `tools/publish.sh`, run it here — that script is yours to write (HTML build, deploy, whatever your setup needs); document its actual behavior in the library's own CLAUDE.md. No such script → Step ⑥ ends at the INDEX commit
-
-## Knowledge spec (binding for all writing)
-
-- **Sourcing**: every claim carries its origin (book + page, or book + chapter). Synthetic EPUB page numbers are reproducible per book, so page citations stay stable
-- Claude's general knowledge not yet backed by the book → mark **⚠unverified**; backfill when the evidence is read
-- Topic-note four-piece: plain-language definition → source → `[[related terms]]` → confusion discrimination (易混辨析)
-- Classics (ancient texts with commentary): four-layer annotation per chapter — ① original passage ② modern translation ③ textual criticism (editions/readings/facts; doubts marked ⚠) ④ interpretation (intellectual lineage and influence). Modern books → tiered (deep / summary / skip)
-- Review cards: Q/A + source + difficulty 1–5 + status
-- Blind spots that recur across Q&A sessions → capture them in `faq/`
-- `ocr/full.txt` is the raw machine-output layer — **never rewrite it**; corrections live only in note layers, keeping the audit trail intact
+学习进度.md is the progress ledger (read-marker harvest from CF KV via mihomo proxy
+127.0.0.1:7890). Publish via publish_web.sh; verify through the proxy afterwards
+(mandatory global rule): expect HTTP 200 on changed URLs after the Workers build window.
 
 ## Hard rules
 
-- Never rewrite the OCR cache; revisions land in note layers only
-- Commit + push at the end of every phase
-- Book source files and OCR caches may be copyrighted — keep them out of any public remote (scrub history with `git filter-repo` before ever making a library public)
-- Missing Python deps auto-install: `pip3 install --user --break-system-packages pymupdf rapidocr-onnxruntime` (drop `--break-system-packages` on hosts where you have sudo or a venv)
+- No OCR anywhere. No text-vs-OCR similarity metrics. OCR history stays deleted.
+- One canonical PROMPT (inside book_parse.py). No A/B/C prompt rounds; no pixel-probe
+  completeness claims. The archive is the only presence witness.
+- Absence claims ("no figures", "fully covered") are forbidden in notes — state what was
+  parsed and where, and let the archive speak.
+- Decorative ornaments (page-tail flourishes, seals) are not figures.
 
 ## Red Flags (stop and self-check)
 
-- "skip the tiering confirmation, we'll review at the end" → violates the confirmation gate; return to ②
-- OCR long task run bare without `timeout` → killed at ~10 min, wasted run
-- quotations trusted straight from OCR without re-checking → violates the quality gate
-- **a quotation typed from memory because "I know this classic"** → the write-side gate exists precisely for this; copy from the cache or mark ⚠unverified
-- **quote_check MISS waved through as "probably OCR noise" without opening the page** → the gate's whole point is forcing that look; unresolved misses are how hallucinated/inverted quotations survive
-- **a text-layer EPUB assumed complete without running check_source** → chapter bodies can be silently absent; every quote from the gap is unsourced
-- **figure coverage declared from 图N-caption continuity or a chapter-window page scan** → appendix/table woodcuts carry table numbers (not 图N captions) and often live outside the chapter window; lint the lesson text for figure-talk (counts like “132图”, 图版/图样) with zero embedded images instead — existence of referenced images is not coverage
-- skipping Step 0 state detection and running from scratch → may redo finished work
-- a .mobi/.azw3 dropped into `sources/` awaiting the pipeline → ① only accepts pdf/epub; convert first
+- "I remember this passage" — quoting from memory instead of the archive (P0 class).
+- Announcing harvest completeness without the archive diff.
+- Third-party vision tools as final acceptors (they misjudge; direct Read is the acceptor).
+- Sharded agents delivering to chat only (must Write the shard file; merge validates).
+- EPUB media treated as page-anchored (it has no page semantics).
 
 ## Maintenance
 
-This English `SKILL.md` is the canonical source. `SKILL.zh.md` is the Chinese mirror — update both together; if they drift, English wins.
-
-**Stale verdicts** (fs1-04 case): any stored absence conclusion ("no plates here", "quota cleared", "chapter has no figures") must carry its scan window / date. When a gate's logic changes, or a counterexample surfaces anywhere in the library, re-run the current gates over *completed* books too — "done" books are exactly where frozen wrong verdicts live (`audit_library.py` exists to make that cheap).
+PROMPT / pipeline changes require user confirmation, then commit in the open repo
+(github.com/MerliniKing/book-eat); private libraries symlink to it. Legacy OCR-era
+artifacts were purged 2026-08-28 (recoverable at git 34e6842^ if ever needed).

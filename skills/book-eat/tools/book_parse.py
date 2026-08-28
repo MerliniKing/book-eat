@@ -59,7 +59,7 @@ def find_pdf(book, override):
     hits = []
     for d, _, fs in os.walk(os.path.join('sources')):
         for fn in fs:
-            if fn.lower().endswith('.pdf') and book.split('-')[-1] in fn:
+            if fn.lower().endswith(('.pdf', '.epub')) and book.split('-')[-1] in fn:
                 hits.append(os.path.join(d, fn))
     if len(hits) != 1:
         sys.exit('PDF 不唯一/未找到，用 --pdf 指定: ' + '; '.join(hits))
@@ -71,7 +71,63 @@ def npages(pdf):
     n = len(doc); doc.close()
     return n
 
+def cmd_render_epub(a, epub):
+    import zipfile, html.parser, json
+    broot = book_root(a.book)
+    outdir = os.path.join(broot, 'book-parse'); os.makedirs(outdir, exist_ok=True)
+    mediadir = os.path.join(outdir, 'media'); os.makedirs(mediadir, exist_ok=True)
+    class _P(html.parser.HTMLParser):
+        def __init__(self):
+            super().__init__(); self.txt=[]; self.title=''; self.media=[]; self._h=None
+        def handle_starttag(self, tag, attrs):
+            if tag in ('h1','h2','h3') and not self.title: self._h=tag
+            if tag=='img':
+                d=dict(attrs)
+                if d.get('src'): self.media.append(os.path.basename(d['src']))
+        def handle_endtag(self, tag):
+            if tag==self._h: self._h=None
+            if tag in ('p','div','h1','h2','h3'): self.txt.append('\n')
+        def handle_data(self, d):
+            d=d.strip()
+            if d:
+                if self._h and not self.title: self.title=d
+                self.txt.append(d+' ')
+    z=zipfile.ZipFile(epub)
+    names=set(z.namelist())
+    container=z.read('META-INF/container.xml').decode('utf-8','ignore')
+    opf=re.search(r'full-path="([^"]+)"',container).group(1)
+    opfdir=os.path.dirname(opf)
+    opfxml=z.read(opf).decode('utf-8','ignore')
+    man={}
+    for tag in re.finditer(r'<item\b[^>]*/?>',opfxml):
+        t=tag.group(0)
+        gid=re.search(r'id="([^"]+)"',t); ghref=re.search(r'href="([^"]+)"',t); gmt=re.search(r'media-type="([^"]+)"',t)
+        if gid and ghref: man[gid.group(1)]=(ghref.group(1), gmt.group(1) if gmt else '')
+    spine=[m.group(1) for m in re.finditer(r'<itemref[^>]*idref="([^"]+)"',opfxml)]
+    chapters=[]
+    for i,idref in enumerate(spine,1):
+        href,mt=man.get(idref,('',''))
+        full=os.path.normpath(os.path.join(opfdir,href)).replace('\\','/')
+        if mt and 'html' not in mt or full not in names: continue
+        p=_P(); p.feed(z.read(full).decode('utf-8','ignore'))
+        txt=re.sub(r'\n{3,}','\n\n',''.join(p.txt)).strip()
+        chapters.append(dict(chapter=i,href=href,title=p.title or os.path.basename(href),text=txt,media=p.media))
+    out=os.path.join(outdir,'chapters.jsonl')
+    open(out,'w',encoding='utf8').write('\n'.join(json.dumps(c,ensure_ascii=False) for c in chapters)+'\n')
+    media_all=sorted({m for c in chapters for m in c['media']})
+    extracted=0
+    for mname in media_all:
+        full=[n for n in names if n.endswith(mname)]
+        if full:
+            open(os.path.join(mediadir,os.path.basename(mname)),'wb').write(z.read(full[0])); extracted+=1
+    print('✓ EPUB 结构化解析：%d 章 → %s；媒体 %d 个 → %s（未登记图录；收割时用 crop --register-media 或明确指示）'
+          % (len(chapters), out, extracted, mediadir))
+    print('  章文本即档案文字；媒体无页码语义，按章节锚定（chapters.jsonl 的 media 字段）')
+
 def cmd_render(a):
+    pdf = find_pdf(a.book, a.pdf)
+    if pdf.lower().endswith('.epub'):
+        return cmd_render_epub(a, pdf)
     import fitz
     pdf = find_pdf(a.book, a.pdf)
     os.makedirs(a.workdir, exist_ok=True)
