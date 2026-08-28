@@ -10,9 +10,8 @@
 - **典籍类书**（古籍点校本）→ 四层精注：①原典摘录 ②白话译文 ③考据（存疑标 ⚠）④义理；现代书 → 分级处理（核心精读/次要摘要/跳过）
 - 复习卡片：Q/A + 出处 + 难度 1-5 + 状态
 - 答疑中反复出现的盲点沉淀进 `faq/`
-- 缓存（`books/*/ocr/full.txt`）是原始机器输出层，**不回写修订**——修订只落笔记层
+- **书籍档案**（`books/<书>/book-parse/`，GLM 直读逐页解析：文字全文+图/表 bbox）是页况与引文的真相源；引文一律从档案复制，档案没有的标 ⚠未验证
 
 ## 环境依赖
 
-- PDF/EPUB 渲染用 pymupdf；扫描件 OCR 用 rapidocr-onnxruntime
-- 安装：`pip3 install --user pymupdf rapidocr-onnxruntime`（Debian 系无 sudo 时加 `--break-system-packages`）
+- PDF 渲染与扫描页处理用 pymupdf＋多模态直读（book_parse.py）；**不使用 OCR**

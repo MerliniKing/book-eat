@@ -28,8 +28,21 @@ html/                        generated site (build_html.py) — html/img staging
 
 ## Tools
 
-`tools/book_parse.py` — render / prompts / merge / crop
-`tools/build_html.py`, `tools/publish_web.sh` — site build & publish (missing figure = publish fails; that is a guard, not a bug)
+`tools/book_parse.py` — render / prompts / merge / chapters / crop (canonical)
+
+Tool status (do NOT resurrect without user sign-off):
+
+| tool | status |
+|---|---|
+| book_parse.py | **current** — parse + harvest pipeline |
+| pages_probe.py | optional pre-filter only; never a completeness witness |
+| extract_figures.py | legacy (private library); superseded by `book_parse crop` |
+| run_ocr.py · quote_check.py · check_source.py | **retired** with OCR (2026-08-28) |
+| fig_coverage_lint.py · audit_library.py | inoperative post-purge (they read books/*/ocr/); kept for history |
+
+Private-library layout note: the host library may nest the pipeline under a content dir
+(e.g. `book-content/books/<book>`, generators under `site/`); run book_parse from the
+directory that owns `books/` so relative paths resolve.
 
 ## Step 0 · State detection (every invocation)
 
