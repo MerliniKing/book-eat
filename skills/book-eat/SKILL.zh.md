@@ -33,6 +33,17 @@ tools/                       book_parse 等流水线工具
 | extract_figures.py | 遗留（私库自持），已被 crop 取代 |
 | run_ocr.py · quote_check.py · check_source.py | **随 OCR 退役**（2026-08-28） |
 | fig_coverage_lint.py · audit_library.py | 清理后失效（依赖 books/*/ocr/），仅存档 |
+## 阶段 × 工具映射
+
+| 阶段 | 工具 / 命令 | 产出 |
+|---|---|---|
+| ① 解析 · 渲染 | `book_parse render <书> [--pdf 源]`（EPUB 自动走结构化分支） | 页图 / `chapters.jsonl` + `media/` |
+| ① 解析 · 派读 | `book_parse prompts <书>` 打印分片派工文本 → 每片派一个只读 Agent | 分片 JSONL（必须写盘，不许只贴对话） |
+| ① 解析 · 合并 | `book_parse merge <书> --round A --dir <分片目录>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` |
+| ② 定纲 | ⛔ 人工确认门——无工具 | 确认的分级方案 |
+| ③–⑤ 写作与收割 | 写精读/摘要/章节 md；`book_parse crop <书>`（档案 bbox → `img/` + 图录.json） | 笔记 / 章节页 / 图片 |
+| ⑥ 构建发布 | `site/build_html.py` → `site/publish_web.sh`（缺图即失败） | 线上站点＋代理验证 200 |
+| 审计（辅助） | `pages_probe.py` 预筛 · 叠框图人验 | 仅标记可疑页 |
 
 ## 第 0 步 · 状态检测（每次调用）
 

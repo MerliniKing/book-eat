@@ -51,6 +51,18 @@ Private-library layout note: the host library may nest the pipeline under a cont
 (e.g. `book-content/books/<book>`, generators under `site/`); run book_parse from the
 directory that owns `books/` so relative paths resolve.
 
+## Stage × tool map
+
+| stage | tool / command | output |
+|---|---|---|
+| ① parse · render | `book_parse render <book> [--pdf src]`（EPUB 自动走结构化分支） | page renders / `chapters.jsonl` + `media/` |
+| ① parse · vision read | `book_parse prompts <book>` prints shard briefs → spawn one Read-only agent per shard | shard JSONL files (Write to disk, never chat-only) |
+| ① parse · merge | `book_parse merge <book> --round A --dir <shards>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` |
+| ② outline | ⛔ human confirmation gate — no tool | confirmed tier plan |
+| ③–⑤ write & harvest | write 精读/摘要/章节 md；`book_parse crop <book>`（archive bbox → `img/` + 图录.json） | notes / chapter pages / figures |
+| ⑥ build & publish | `site/build_html.py` → `site/publish_web.sh`（missing figure = fail） | live site, then proxy-verify 200 |
+| audit (aux) | `pages_probe.py` pre-filter · overlay eyeball | flagged pages only |
+
 ## Step 0 · State detection (every invocation)
 
 | book-content/books/<book>/book-parse/ | book-content/books/<book>/chapter-*.md | state |
