@@ -17,7 +17,10 @@ changes require user sign-off). Nothing else is a completeness witness.
 book-content/
   books/<book>/
     book-parse/              TRUTH SOURCE (per-page / per-chapter archive)
-      pages.jsonl            PDF: {page, book_page, is_toc, toc, has_figure, has_table, regions[bbox%], text}
+      pages.jsonl            PDF: {page, book_page, is_toc, toc, has_figure, has_table, regions, text}
+                             regions: [y0,y1,type]（2026-08-31 起：左右无环绕正文时上下两界简写，crop 取整页宽）
+                                      或 [x0,y0,x1,y1,type]（左右有环绕正文时的全四坐标；旧档案均为四坐标，crop 双兼容）
+      verify/                10% sampled crop verification: samples.json + sample-report.jsonl (+ temporary page renders, gitignored)
       chapters.jsonl         chapter table: {title, print_page, pdf_page, end_pdf_page, verified}
       media/                 EPUB embedded media (extracted, unregistered until harvest)
     img/                     cropped figures actually harvested (+ 图录.json manifest)
@@ -58,6 +61,7 @@ directory that owns `books/` so relative paths resolve.
 | ① parse · render | `book_parse render <book> [--pdf src]`（EPUB 自动走结构化分支） | page renders / `chapters.jsonl` + `media/` |
 | ① parse · vision read | `book_parse prompts <book>` prints shard briefs → spawn one Read-only agent per shard (**max 2 concurrent** — user-set 2026-08-31; gateway hard-caps ≈4 with account-level 429 at 5+) | shard JSONL files, appended per page with `ts` (never chat-only, never batch-at-end) |
 | ① parse · crop | `book_parse crop <book> --round A --dir <shards>`（merge 之前；regions → `book-parse/imgs/`，幂等） | per-page figure/table crops |
+| ① parse · verify | `book_parse sample <book>`（10% 随机抽裁图 → 渲染 300dpi 原页 → 打印抽检派工；agent 回填报告后 `sample --check` 验收，非 pass＝exit 1。**2026-08-31 起替代逐张目验**） | `book-parse/verify/{samples.json,sample-report.jsonl}` |
 | ① parse · merge | `book_parse merge <book> --round A --dir <shards>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` + `chapters/<章>/`（原文聚合＋图表 md 引用） |
 | ② distill | `book_parse distill <book>` prints per-chapter briefs → agents write 精读 notes | 精读/chapter-<NN>-*.md（每页必有提炼，无跳过） |
 | ③–⑤ write & archive | 章节页写作（基于精读与档案）；卡片 | chapter pages / cards |
@@ -90,8 +94,12 @@ directory that owns `books/` so relative paths resolve.
 - `book_parse timing <book>` aggregates per-stage timing (`book-parse/timing/report.json`):
   render/crop per-page measured; 直读 from shard `ts` diffs; 精读 from note t0/t1 stamps.
   Archives parsed before 2026-08-31 carry no timing data.
-- Acceptance: merge reports continuity; eyeball the bbox overlay of a few pages before
-  calling the archive done.
+- Acceptance: merge reports continuity; crop quality is verified by `sample` — a random
+  10% (≥3) of crops are checked against 300dpi originals with report-style prompts
+  (what's inside / edges cut / annex text), never yes/no questions; `sample --check`
+  gates on missing or non-pass verdicts. (2026-08-31 user decision, superseding
+  per-crop eyeballing; the p332-class lesson stands: third-party vision stays pre-screen
+  only, direct Read of full-resolution pages is the acceptor.)
 
 ## ② Distill — every page, no skipping
 

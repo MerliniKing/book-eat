@@ -24,11 +24,18 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
   timing  <书> [--outlier 1800]
           汇总各环节逐页/逐章计时 → 打印报表＋落 book-parse/timing/report.json
           （render/crop 为逐页实测；直读来自分片 ts 差分；精读来自笔记 t0/t1 印）
+  sample  <书> [--ratio 0.10] [--seed N] [--dpi 300] [--check]
+          裁后抽检（2026-08-31 用户定案，替代逐张目验）：随机抽裁图 10%（至少 3 张），
+          按高分辨率重渲染抽中页原页 PNG → book-parse/verify/，打印抽检派工文本；
+          agent 回填 verify/sample-report.jsonl 后跑 --check 验收，缺报/非 pass 即 exit 1
           页级漏报/误报（GT=图录有图页∪表页）＋区域 IoU（vs 图录 rect）
           抽验走 overlay 叠框图/人工抽页协议）
 
-正典 PROMPT（2026-08-31 用户指示改版：逐页计时落盘 ＋ 增量交付抗中断，
-替代 2026-08-28 双保险版——终报不再重贴全文，由 merge 行数/连续性校验兜底）：
+正典 PROMPT（2026-08-31 两次用户定案改版：
+①逐页计时落盘＋增量交付抗中断，终报不再重贴全文，由 merge 行数/连续性校验兜底；
+②regions 允许两界简写：图/表左右无环绕正文时只报 [y0,y1,type]（左右默认整页宽），
+有环绕正文则仍报全四坐标；裁后验收由逐张目验改为 10% 随机抽检（sample 子命令），
+crop 对两种坐标形双兼容）：
 见 PROMPT 常量。改它须经用户确认。
 
 用法示例（在库根目录）：
@@ -36,15 +43,15 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
   python3 tools/book_parse.py prompts 今-汉宝德-风水与环境 --round A
   python3 tools/book_parse.py merge 今-汉宝德-风水与环境 --round A
 """
-import argparse, glob, json, os, re, sys, time
+import argparse, glob, json, math, os, random, re, sys, time
 
 PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫描图 pNNN.png。用 Read 工具逐张查看 {lo_png} 至 {hi_png}，为每页输出一行 JSON：
 {{"page":N,"has_figure":布尔,"has_table":布尔,"regions":[[x0,y0,x1,y1,"figure"或"table"]],"text":"…"}}，并附加三个字段：
 {{"page":N,"book_page":本页印刷页码或null,"is_toc":布尔,"toc":[{{"title":"章节名","book_page":起始书页}}],
  "has_figure":布尔,"has_table":布尔,"regions":[…],"text":"…"}}
 
-示例——假如某页上半是一张带边框的「历代纪元表」、中间一段正文、下方一幅无框山水示意图，理想输出是：
-{{"page":57,"has_figure":true,"has_table":true,"regions":[[8,10,92,40,"table"],[12,55,88,82,"figure"]],"text":"…正文自表格之后抄起…"}}
+示例——假如某页上半是一张带边框的「历代纪元表」（纵向 10%–40%，通栏两侧无环绕正文）、中间一段正文、下方一幅右侧带批注文字的山水示意图（纵 55%–82%、横 12%–88%），理想输出是：
+{{"page":57,"has_figure":true,"has_table":true,"regions":[[10,40,"table"],[12,55,88,82,"figure"]],"text":"…正文自表格之后抄起…"}}
 要点：表格框含边框整体；示意图连同它下方那行题注一起框；text 只抄正文文字，表格里和图里的字不抄。
 
 新增字段规则：
@@ -55,8 +62,10 @@ PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫
 判定规则：
 1. has_table=true 当且仅当页面存在由边框线/行列分隔线构成的表格结构
 2. has_figure=true 当页面存在正文文字排版之外的图形：插图、照片、地图、图表、示意图、手绘图皆算；纯装饰纹样、页眉页脚不算
-3. regions：每个独立图表的最小完整外接框，必须把题注、图内标注、紧邻图例一起包入（表格含边框整体）；坐标为页面百分比（x0左/y0上/x1右/y1下，0–100，原点左上）；无图表填 []
-   ★ 表格内部嵌的小图不单独标注坐标——一张表只给一组 table 坐标；表格之外的独立图才单独框
+3. regions：每个独立图表一个框。标准形 [x0,y0,x1,y1,"figure"或"table"]——页面百分比（x0左/y0上/x1右/y1下，0–100，原点左上）。
+   简写：图/表**左右没有环绕正文**（两侧是页缘/留白/版心空白）时，可只报上下两界 [y0,y1,"figure"或"table"]，左右默认整页宽；
+   左右有环绕正文/旁批/双栏文字则必须报全 4 坐标把图表单独框出。上下界必须把附属文字一起包入：题注、图内标注、紧邻图例（表格含边框整体，y0=边框上沿线 y1=边框下沿线/末行下缘）；无图表填 []
+   ★ 表格内部嵌的小图不单独标注——一张表只给一组坐标；表格之外的独立图才单独框
 4. text：忠实转写该页全部正文文字，按阅读顺序，含章节标题；表格与图内部文字不转写；空白页输出 ""；辨认不清的字写【不可辨】
 5. 纪律：每页必须亲眼看过再判定；不跳页、不臆测；扫描污渍不是图
 
@@ -392,7 +401,7 @@ def assemble(a, broot, outdir, rows):
         figs = []
         for p in members:
             for k, rg in enumerate(rows[p].get('regions', []), 1):
-                typ = rg[4] if len(rg) > 4 else 'figure'
+                typ = rg[-1] if len(rg) in (3, 5) and isinstance(rg[-1], str) else 'figure'
                 figs.append('![PDF p%d %s](../../imgs/p%03d-%d.jpg)' % (p, typ, p, k))
         for p in members:
             t = (rows[p].get('text') or '').replace('\\n', '\n')
@@ -468,7 +477,11 @@ def cmd_crop(a):
                 fn = os.path.join(outdir, 'p%03d-%d.jpg' % (p, k))
                 if os.path.exists(fn) and not a.force:
                     skipped += 1; continue
-                clip = fitz.Rect(rg[0] / 100 * pw, rg[1] / 100 * ph, rg[2] / 100 * pw, rg[3] / 100 * ph)
+                if len(rg) >= 4:    # 旧版四坐标 [x0,y0,x1,y1,(type)]
+                    x0, y0, x1, y1 = rg[0], rg[1], rg[2], rg[3]
+                else:               # 2026-08-31 版两界 [y0,y1,type] → 整页宽（左右不带偏）
+                    x0, y0, x1, y1 = 0.0, rg[0], 100.0, rg[1]
+                clip = fitz.Rect(x0 / 100 * pw, y0 / 100 * ph, x1 / 100 * pw, y1 / 100 * ph)
                 pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.dpi, colorspace=fitz.csGRAY)
                 pix.save(fn, jpg_quality=80)
                 made += 1
@@ -543,9 +556,83 @@ def cmd_timing(a):
         if v.get('note'):
             print('         └ %s' % v['note'])
 
+SAMPLE_BRIEF = """=== 裁图抽检派工（{ratio:.0%} 随机抽样 {n}/{total} 张；清单 {samples}）===
+你是裁图抽检员。对下面每一项：
+①Read {vdir}/pNNN.png（原页整页图，按页号对号入座）
+②Read {imgs}/pNNN-k.jpg（从该页裁出的图/表）
+然后只回答三个报告题（不要给「看起来完整」这类整体判断，只报具体内容）：
+1. what  裁图里装的是什么：表格→报行列数与首行/末行内容；整页图版→报子图数与各局名/编号；插图→念出题注原文
+2. edges 对照原页：裁图上缘、下缘处原内容是否被切断（如「上缘完整；下缘切断，被切的是表格末行」）
+3. annex 附属文字（题注/图例/编号说明）原页上有哪些、裁图包进了哪些、缺了哪些
+每项输出一行 JSONL：
+{{"page":页号,"k":序号,"what":"…","edges":"…","annex":"…","verdict":"pass|切上缘|切下缘|缺附属|内容不符|存疑"}}
+verdict 仅当 1–3 全无缺失才判 pass；任何缺失/切断/不符用对应标签，拿不准写「存疑」。
+全部 {n} 行 JSONL 用 Write 写入 {report}，最终回复只写一句：「抽检完成：共 {n} 行，非 pass N 条（N＝verdict≠pass 的行数，自数）」。"""
+
+def cmd_sample(a):
+    """裁后抽检（2026-08-31 用户定案，替代逐张目验/全量终验）：从 book-parse/imgs/ 随机抽
+    ratio 比例（至少 3 张），按高分辨率重渲染抽中页原页 PNG 到 book-parse/verify/，
+    打印抽检派工文本；agent 回填 sample-report.jsonl 后用 --check 校验，缺报/非 pass 即 exit 1。"""
+    broot = book_root(a.book)
+    imgs = os.path.join(broot, 'book-parse', 'imgs')
+    vdir = os.path.join(broot, 'book-parse', 'verify')
+    os.makedirs(vdir, exist_ok=True)
+    samples_path = os.path.join(vdir, 'samples.json')
+    report_path = os.path.join(vdir, 'sample-report.jsonl')
+    if a.check:
+        if not os.path.exists(samples_path):
+            sys.exit('抽样清单不存在: %s（先跑 sample 生成抽样）' % samples_path)
+        meta = json.load(open(samples_path, encoding='utf8'))
+        picks = [(s['page'], s['k']) for s in meta['sampled']]
+        if not os.path.exists(report_path):
+            sys.exit('抽检报告不存在: %s' % report_path)
+        got = {}
+        for line in open(report_path, encoding='utf8'):
+            line = line.strip()
+            if line and not line.startswith('#'):
+                r = json.loads(line)
+                got[(r['page'], r['k'])] = r
+        missing = [t for t in picks if t not in got]
+        bad = [(t, got[t].get('verdict', '?')) for t in picks if t in got and got[t].get('verdict') != 'pass']
+        print('抽检 %d/%d 张：pass %d ｜ 非pass %d ｜ 缺报 %d'
+              % (len(picks), meta['n_crops'], len(picks) - len(missing) - len(bad), len(bad), len(missing)))
+        for (p, k), v in bad:
+            print('  ✗ p%03d-%d verdict=%s' % (p, k, v))
+        if missing:
+            print('  ✗ 未覆盖: %s' % ', '.join('p%03d-%d' % t for t in missing[:10]))
+        if missing or bad:
+            sys.exit(1)
+        print('✓ 抽检通过')
+        return
+    crops = []
+    for fn in sorted(os.listdir(imgs)) if os.path.isdir(imgs) else []:
+        m = re.match(r'^p(\d+)-(\d+)\.jpg$', fn)
+        if m:
+            crops.append((int(m.group(1)), int(m.group(2))))
+    if not crops:
+        sys.exit('无裁图: %s（先跑 crop）' % imgs)
+    n = min(len(crops), max(3, math.ceil(len(crops) * a.ratio)))
+    picks = sorted(random.Random(a.seed).sample(crops, n))
+    json.dump({'seed': a.seed, 'ratio': a.ratio, 'n_crops': len(crops),
+               'sampled': [{'page': p, 'k': k} for p, k in picks]},
+              open(samples_path, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+    # 原页按高分辨率重渲染（审计教训：高分辨率整页 > 缩略蒙太奇，缩略会幻觉「无切边」）
+    dpi = 300 if a.dpi == 100 else a.dpi      # 未显式给 --dpi 时抽检用 300（render 的默认 100 不够看）
+    import fitz
+    doc = fitz.open(find_pdf(a.book, a.pdf))
+    for pg in sorted({p for p, _ in picks}):
+        out = os.path.join(vdir, 'p%03d.png' % pg)
+        if os.path.exists(out):
+            continue
+        doc[pg - 1].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY).save(out)
+    doc.close()
+    print(SAMPLE_BRIEF.format(ratio=a.ratio, n=n, total=len(crops), vdir=vdir, imgs=imgs,
+                              samples=samples_path, report=report_path))
+    print('抽样明细：%s' % ', '.join('p%03d-%d' % t for t in picks))
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('子命令：')[0])
-    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop', 'distill', 'timing'])
+    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop', 'distill', 'timing', 'sample'])
     ap.add_argument('book')
     ap.add_argument('--pdf'); ap.add_argument('--dpi', type=int, default=100)
     ap.add_argument('--workdir', default=None)
@@ -557,12 +644,15 @@ def main():
     ap.add_argument('--offset', type=int, default=None)
     ap.add_argument('--force', action='store_true')
     ap.add_argument('--outlier', type=int, default=1800)
+    ap.add_argument('--ratio', type=float, default=0.10)
+    ap.add_argument('--seed', type=int, default=None)
+    ap.add_argument('--check', action='store_true')
     a = ap.parse_args()
     if a.workdir is None:
         a.workdir = '/tmp/book_parse_' + re.sub(r'[^\w]', '', a.book)
     {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge,
      'chapters': cmd_chapters, 'crop': cmd_crop, 'distill': cmd_distill,
-     'timing': cmd_timing}[a.cmd](a)
+     'timing': cmd_timing, 'sample': cmd_sample}[a.cmd](a)
 
 if __name__ == '__main__':
     main()
