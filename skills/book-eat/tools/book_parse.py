@@ -21,10 +21,14 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
           合并前逐页裁剪：分片 regions → book-parse/imgs/p<页>-<序>.jpg（幂等，已存在跳过）
   distill <书>
           打印每章精读提炼的派工文本（每页都要提炼，无跳过；笔记落 精读/）
+  timing  <书> [--outlier 1800]
+          汇总各环节逐页/逐章计时 → 打印报表＋落 book-parse/timing/report.json
+          （render/crop 为逐页实测；直读来自分片 ts 差分；精读来自笔记 t0/t1 印）
           页级漏报/误报（GT=图录有图页∪表页）＋区域 IoU（vs 图录 rect）
           抽验走 overlay 叠框图/人工抽页协议）
 
-正典 PROMPT（2026-08-28 用户确认合并版：A 判据条款 × C 示例校准 × B/C 双保险交付）：
+正典 PROMPT（2026-08-31 用户指示改版：逐页计时落盘 ＋ 增量交付抗中断，
+替代 2026-08-28 双保险版——终报不再重贴全文，由 merge 行数/连续性校验兜底）：
 见 PROMPT 常量。改它须经用户确认。
 
 用法示例（在库根目录）：
@@ -32,7 +36,7 @@ r"""book_parse —— 多模态直读逐页解析流水线（固化的原子能�
   python3 tools/book_parse.py prompts 今-汉宝德-风水与环境 --round A
   python3 tools/book_parse.py merge 今-汉宝德-风水与环境 --round A
 """
-import argparse, glob, json, os, re, sys
+import argparse, glob, json, os, re, sys, time
 
 PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫描图 pNNN.png。用 Read 工具逐张查看 {lo_png} 至 {hi_png}，为每页输出一行 JSON：
 {{"page":N,"has_figure":布尔,"has_table":布尔,"regions":[[x0,y0,x1,y1,"figure"或"table"]],"text":"…"}}，并附加三个字段：
@@ -56,7 +60,13 @@ PROMPT = """你是书页解析员。{workdir}/ 目录下是某本书的逐页扫
 4. text：忠实转写该页全部正文文字，按阅读顺序，含章节标题；表格与图内部文字不转写；空白页输出 ""；辨认不清的字写【不可辨】
 5. 纪律：每页必须亲眼看过再判定；不跳页、不臆测；扫描污渍不是图
 
-交付：全部 {n} 行 JSONL 用 Write 工具写入 {outfile}，然后在最终回复里原样贴出这 {n} 行（双保险）。不要输出任何解释文字。"""
+计时与交付（铁律）：
+0. 动工前先用 Bash 跑 date +%s 记为 T0。若 {outfile} 已存在，先统计其中已有页行（grep -c '"page"'），
+   从下一个未交付页续跑，已交付页不重读。
+1. 每读完并转写完一页，立即用 Bash 把该页这行 JSONL 追加进 {outfile}（cat <<'EOF' 方式），
+   对象内末尾固定加字段 "ts":<unix秒>，ts 取自同一条命令里的 $(date +%s)。逐页落盘，绝不攒批。
+2. {n} 页全部追加完，再用 Bash 向 {outfile} 末尾追加一行：# end $(date +%s)
+3. 最终回复固定一句话：「分片完成：{outfile} 共 {n} 行」。不要在回复里重贴 JSONL，不要任何解释。"""
 
 def _root():
     """仓库根自动探测：向上找含 sources/ 的目录（流水线可在根或 book-content/ 下执行）。"""
@@ -156,11 +166,20 @@ def cmd_render(a):
     import fitz
     pdf = find_pdf(a.book, a.pdf)
     os.makedirs(a.workdir, exist_ok=True)
+    tdir = os.path.join(book_root(a.book), 'book-parse', 'timing')
+    os.makedirs(tdir, exist_ok=True)
+    t0 = time.time()
     doc = fitz.open(pdf)
-    for i in range(len(doc)):
-        doc[i].get_pixmap(dpi=a.dpi).save(os.path.join(a.workdir, 'p%03d.png' % (i + 1)))
+    with open(os.path.join(tdir, 'render.jsonl'), 'w', encoding='utf8') as tf:
+        for i in range(len(doc)):
+            t1 = time.time()
+            doc[i].get_pixmap(dpi=a.dpi).save(os.path.join(a.workdir, 'p%03d.png' % (i + 1)))
+            tf.write(json.dumps({'page': i + 1, 'sec': round(time.time() - t1, 2)}) + '\n')
+            tf.flush()
     n = len(doc); doc.close()
-    print('rendered %d pages -> %s' % (n, a.workdir))
+    wall = time.time() - t0
+    print('rendered %d pages -> %s（墙钟 %.1fs，均 %.2fs/页；逐页明细 %s）'
+          % (n, a.workdir, wall, wall / n, os.path.join(tdir, 'render.jsonl')))
 
 def cmd_prompts(a):
     pdf = find_pdf(a.book, a.pdf)
@@ -188,6 +207,7 @@ def _fix_line(line):
 
 def cmd_merge(a):
     broot = book_root(a.book)
+    t0 = time.time()
     shards = [f for f in sorted(glob.glob(os.path.join(a.dir, 'round%s-*.jsonl' % a.round)))
               if '-all' not in os.path.basename(f)]
     if not shards:
@@ -198,7 +218,7 @@ def cmd_merge(a):
             continue
         for line in open(sp, encoding='utf8'):
             line = line.strip()
-            if not line:
+            if not line or line.startswith('#'):    # '# end <ts>' 等计时注记行
                 continue
             r = json.loads(_fix_line(line))
             rows[r['page']] = r
@@ -216,6 +236,9 @@ def cmd_merge(a):
     nf = sum(rows[p]['has_figure'] for p in pages)
     nt = sum(rows[p]['has_table'] for p in pages)
     print('✓ %s（%d 页 %d-%d 连续）has_figure=%d has_table=%d' % (out, len(pages), pages[0], pages[-1], nf, nt))
+    tdir = os.path.join(outdir, 'timing'); os.makedirs(tdir, exist_ok=True)
+    json.dump({'pages': len(pages), 'total_sec': round(time.time() - t0, 1)},
+              open(os.path.join(tdir, 'merge.json'), 'w'))
     # ── 组装器：以书页号为对齐键，汇总章节文本＋裁图＋md 引用 ──
     chapters_out = assemble(a, broot, outdir, rows)
     if chapters_out is not None:
@@ -239,7 +262,8 @@ def cmd_distill(a):
         '产出该章精读笔记 md：Write 到 精读/chapter-<章序>-<标题>.md。\n'
         '要求：①覆盖该章每一页——无跳过、无略字；②术语首现必释；③引文原样摘自 chapter.md 内的原文，不得改写；\n'
         '④每页至少一条提炼（要点/存疑/联想任一）；⑤图表引用原样保留并各配一句解读；\n'
-        '⑥开头写明章名与书页区间。笔记正文不设上限，以不漏信息为准。')
+        '⑥开头写明章名与书页区间。笔记正文不设上限，以不漏信息为准。\n'
+        '计时：动工时先 Bash 取 date +%s 写进笔记首行 <!-- t0:<unix> -->；完稿后再取一次，写末行 <!-- t1:<unix> -->。')
     print(brief)
     for i, c in enumerate(chs, 1):
         print('--- 章节派工 %02d：chapters/%02d-%s/chapter.md → 精读/chapter-%02d-%s.md'
@@ -424,32 +448,104 @@ def cmd_crop(a):
     rows = {}
     for sp in shards:
         for line in open(sp, encoding='utf8'):
-            if line.strip():
+            line = line.strip()
+            if line and not line.startswith('#'):   # '# end <ts>' 等计时注记行
                 r = json.loads(line); rows[r['page']] = r
     pdf = find_pdf(a.book, a.pdf)
     doc = fitz.open(pdf)
     outdir = os.path.join(broot, 'book-parse', 'imgs')
     os.makedirs(outdir, exist_ok=True)
+    tdir = os.path.join(broot, 'book-parse', 'timing'); os.makedirs(tdir, exist_ok=True)
     made = skipped = 0
-    for p in sorted(rows):
-        regs = rows[p].get('regions') or []
-        if not regs:
-            continue
-        pw, ph = doc[p - 1].rect.width, doc[p - 1].rect.height
-        for k, rg in enumerate(regs, 1):
-            fn = os.path.join(outdir, 'p%03d-%d.jpg' % (p, k))
-            if os.path.exists(fn) and not a.force:
-                skipped += 1; continue
-            clip = fitz.Rect(rg[0] / 100 * pw, rg[1] / 100 * ph, rg[2] / 100 * pw, rg[3] / 100 * ph)
-            pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.dpi, colorspace=fitz.csGRAY)
-            pix.save(fn, jpg_quality=80)
-            made += 1
+    with open(os.path.join(tdir, 'crop.jsonl'), 'w', encoding='utf8') as tf:
+        for p in sorted(rows):
+            regs = rows[p].get('regions') or []
+            if not regs:
+                continue
+            t1 = time.time()
+            pw, ph = doc[p - 1].rect.width, doc[p - 1].rect.height
+            for k, rg in enumerate(regs, 1):
+                fn = os.path.join(outdir, 'p%03d-%d.jpg' % (p, k))
+                if os.path.exists(fn) and not a.force:
+                    skipped += 1; continue
+                clip = fitz.Rect(rg[0] / 100 * pw, rg[1] / 100 * ph, rg[2] / 100 * pw, rg[3] / 100 * ph)
+                pix = doc[p - 1].get_pixmap(clip=clip, dpi=a.dpi, colorspace=fitz.csGRAY)
+                pix.save(fn, jpg_quality=80)
+                made += 1
+            tf.write(json.dumps({'page': p, 'figs': len(regs), 'sec': round(time.time() - t1, 2)}) + '\n')
     doc.close()
-    print('✓ 逐页裁剪 %d 张（跳过已存在 %d）→ %s' % (made, skipped, outdir))
+    print('✓ 逐页裁剪 %d 张（跳过已存在 %d）→ %s；逐页明细 %s/crop.jsonl' % (made, skipped, outdir, tdir))
+
+def _stats(xs):
+    """秒数列表 → n/均值/中位/最快/最慢/p90；空列表返回 None。"""
+    if not xs:
+        return None
+    xs = sorted(xs)
+    return {'n': len(xs), 'avg': round(sum(xs) / len(xs), 1), 'med': xs[len(xs) // 2],
+            'min': xs[0], 'max': xs[-1], 'p90': xs[min(len(xs) - 1, int(len(xs) * 0.9))]}
+
+def cmd_timing(a):
+    """汇总各环节计时：render/crop 逐页实测；直读取 pages.jsonl 的 ts 差分（跨分片跳变剔除）；精读取笔记 t0/t1。"""
+    broot = book_root(a.book)
+    tdir = os.path.join(broot, 'book-parse', 'timing')
+    os.makedirs(tdir, exist_ok=True)
+    rep = {}
+    # render / crop：逐页实测明细
+    for key, fn, unit in (('render', 'render.jsonl', '秒/页'), ('crop', 'crop.jsonl', '秒/图页')):
+        p = os.path.join(tdir, fn)
+        if os.path.exists(p):
+            xs = [json.loads(l)['sec'] for l in open(p, encoding='utf8') if l.strip()]
+            rep[key] = {'unit': unit, 'total_sec': round(sum(xs), 1), 'per': _stats(xs)}
+    # merge：整体墙钟
+    p = os.path.join(tdir, 'merge.json')
+    if os.path.exists(p):
+        rep['merge'] = {'unit': '秒/整体', **json.load(open(p, encoding='utf8'))}
+    # 直读：ts 差分（分片并发时跨分片相邻页差分为负/异常大，剔除）
+    ppath = os.path.join(broot, 'book-parse', 'pages.jsonl')
+    if os.path.exists(ppath):
+        rows = [json.loads(l) for l in open(ppath, encoding='utf8') if l.strip()]
+        ts = {r['page']: r['ts'] for r in rows if isinstance(r.get('ts'), int)}
+        ds, prev_pg = [], None
+        for pg in sorted(ts):
+            if prev_pg is not None and pg == prev_pg + 1:      # 仅同分片内相邻页可差分
+                d = ts[pg] - ts[prev_pg]
+                if 0 < d < a.outlier:
+                    ds.append(d)
+            prev_pg = pg
+        if ds:
+            rep['直读'] = {'unit': '秒/页', 'per': _stats(ds),
+                           'note': 'ts 差分（含逐页落盘往返）；跳变>%ds 或非同分片相邻页不计' % a.outlier}
+    # 精读：笔记首尾 t0/t1 印 → 秒/章
+    jd = os.path.join(broot, 'book-parse', '精读')
+    if os.path.isdir(jd):
+        ch = []
+        for fn in sorted(os.listdir(jd)):
+            if not fn.endswith('.md'):
+                continue
+            txt = open(os.path.join(jd, fn), encoding='utf8').read()
+            m0, m1 = re.search(r't0:(\d+)', txt), re.search(r't1:(\d+)', txt)
+            if m0 and m1:
+                ch.append(int(m1.group(1)) - int(m0.group(1)))
+        if ch:
+            rep['精读'] = {'unit': '秒/章', 'per': _stats(ch), 'total_sec': sum(ch)}
+    out = os.path.join(tdir, 'report.json')
+    json.dump(rep, open(out, 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+    print('=== 计时报表 → %s' % out)
+    if not rep:
+        print('  （无计时数据：2026-08-31 前的旧档案无 ts/t0-t1 印，render/crop 未重跑）')
+    for k, v in rep.items():
+        line = '  %-6s 合计 %ss' % (k, v.get('total_sec', '—'))
+        if v.get('per'):
+            s = v['per']
+            line += '；%s n=%d 均 %s%s 中位 %s 最快 %s 最慢 %s p90 %s' % (
+                'per', s['n'], s['avg'], v['unit'], s['med'], s['min'], s['max'], s['p90'])
+        print(line)
+        if v.get('note'):
+            print('         └ %s' % v['note'])
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('子命令：')[0])
-    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop', 'distill'])
+    ap.add_argument('cmd', choices=['render', 'prompts', 'merge', 'chapters', 'crop', 'distill', 'timing'])
     ap.add_argument('book')
     ap.add_argument('--pdf'); ap.add_argument('--dpi', type=int, default=100)
     ap.add_argument('--workdir', default=None)
@@ -460,11 +556,13 @@ def main():
     ap.add_argument('--pages', default=None)
     ap.add_argument('--offset', type=int, default=None)
     ap.add_argument('--force', action='store_true')
+    ap.add_argument('--outlier', type=int, default=1800)
     a = ap.parse_args()
     if a.workdir is None:
         a.workdir = '/tmp/book_parse_' + re.sub(r'[^\w]', '', a.book)
     {'render': cmd_render, 'prompts': cmd_prompts, 'merge': cmd_merge,
-     'chapters': cmd_chapters, 'crop': cmd_crop, 'distill': cmd_distill}[a.cmd](a)
+     'chapters': cmd_chapters, 'crop': cmd_crop, 'distill': cmd_distill,
+     'timing': cmd_timing}[a.cmd](a)
 
 if __name__ == '__main__':
     main()

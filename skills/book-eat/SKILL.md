@@ -35,7 +35,7 @@ Publish resolves each `src="img/…"` in a chapter page directly from
 
 ## Tools
 
-`tools/book_parse.py` — render / prompts / merge / chapters / crop (canonical)
+`tools/book_parse.py` — render / prompts / merge / chapters / crop / distill / timing (canonical)
 
 Tool status (do NOT resurrect without user sign-off):
 
@@ -56,7 +56,7 @@ directory that owns `books/` so relative paths resolve.
 | stage | tool / command | output |
 |---|---|---|
 | ① parse · render | `book_parse render <book> [--pdf src]`（EPUB 自动走结构化分支） | page renders / `chapters.jsonl` + `media/` |
-| ① parse · vision read | `book_parse prompts <book>` prints shard briefs → spawn one Read-only agent per shard | shard JSONL files (Write to disk, never chat-only) |
+| ① parse · vision read | `book_parse prompts <book>` prints shard briefs → spawn one Read-only agent per shard (**max 2 concurrent** — user-set 2026-08-31; gateway hard-caps ≈4 with account-level 429 at 5+) | shard JSONL files, appended per page with `ts` (never chat-only, never batch-at-end) |
 | ① parse · crop | `book_parse crop <book> --round A --dir <shards>`（merge 之前；regions → `book-parse/imgs/`，幂等） | per-page figure/table crops |
 | ① parse · merge | `book_parse merge <book> --round A --dir <shards>`（自动附章节解析） | `book-parse/pages.jsonl` + `chapters.jsonl` + `chapters/<章>/`（原文聚合＋图表 md 引用） |
 | ② distill | `book_parse distill <book>` prints per-chapter briefs → agents write 精读 notes | 精读/chapter-<NN>-*.md（每页必有提炼，无跳过） |
@@ -83,7 +83,13 @@ directory that owns `books/` so relative paths resolve.
 
 - Scanned path: `book_parse render` (serial, dpi100) → `book_parse prompts` prints per-shard
   agent briefs → one Read-only agent per shard (presence + bbox + full text) → `merge`
-  (validates continuity/fields).
+  (validates continuity/fields). Concurrency = 2 (user-set 2026-08-31, down from gateway
+  cap ≈4, to cut 429s and agent deaths). Vision agents append each page line (with `"ts"`
+  unix-stamp) to the shard file immediately and never re-paste JSONL in their final reply —
+  a death then loses at most one page, and the file tail is the resume point.
+- `book_parse timing <book>` aggregates per-stage timing (`book-parse/timing/report.json`):
+  render/crop per-page measured; 直读 from shard `ts` diffs; 精读 from note t0/t1 stamps.
+  Archives parsed before 2026-08-31 carry no timing data.
 - Acceptance: merge reports continuity; eyeball the bbox overlay of a few pages before
   calling the archive done.
 
@@ -122,7 +128,8 @@ covers EVERY page: per chapter, write 精读 notes from chapter.md (verbatim quo
 - "I remember this passage" — quoting from memory instead of the archive (P0 class).
 - Announcing harvest completeness without the archive diff.
 - Third-party vision tools as final acceptors (they misjudge; direct Read is the acceptor).
-- Sharded agents delivering to chat only (must Write the shard file; merge validates).
+- Sharded agents delivering to chat only, or batching all pages into one end-of-run
+  Write (death-prone; the canonical PROMPT requires per-page append + `ts` stamp).
 - EPUB media treated as page-anchored (it has no page semantics).
 
 ## Maintenance
