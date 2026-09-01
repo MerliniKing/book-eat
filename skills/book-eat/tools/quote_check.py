@@ -15,6 +15,12 @@ Usage:
 
 Method: blockquote lines are split on punctuation into fragments (>=5 chars);
 whitespace/stripped-control-char cache is searched for each fragment verbatim.
+Interlinear notes: the cache may flatten the original's double-line small notes
+inline (scan-to-archive pipelines, e.g. GLM 直读) — such notes are part of the
+original text layer. Quote-side parentheses are dropped before matching, so a
+quote whose middle carries a parenthesized note would break continuity against
+a cache that still contains it. Fix (fs6-lesson-03, 52/52): each fragment is
+sought in BOTH the raw cache and a paren-stripped copy of it.
 A MISS is only a *suspect*, never a verdict: OCR noise, traditional/simplified
 variants, edition variants and translated quotes (foreign-language books) all
 miss legitimately. The gate's job is to force every miss to be *resolved* as
@@ -35,9 +41,16 @@ MIN_FRAG = 5
 VARIANTS = {'入': '人', '微': '薇', '辨': '辯', '蚀': '食', '睺': '喉'}
 
 
-def load_cache(path: str) -> str:
+def load_cache(path: str):
+    """Return (raw_cache, paren_stripped_cache), both whitespace-free.
+
+    The stripped copy lets quotes whose inline （…） was dropped (editorial or
+    interlinear-note parens) stay contiguous against archives that flatten the
+    original's double-line small notes into the text layer (fs6-lesson-03).
+    """
     raw = pathlib.Path(path).read_bytes().decode('utf-8', errors='ignore')
-    return re.sub(r'[\x00-\x08\x0b-\x1f\x7f\s]', '', raw)
+    flat = re.sub(r'[\x00-\x08\x0b-\x1f\x7f\s]', '', raw)
+    return flat, re.sub(r'（[^）]*）', '', flat)
 
 
 def fragments(line: str):
@@ -49,17 +62,18 @@ def fragments(line: str):
     return [p for p in parts if len(p) >= MIN_FRAG]
 
 
-def check_note(note_path: str, cache: str):
+def check_note(note_path: str, caches):
     suspects = []
     for i, line in enumerate(pathlib.Path(note_path).read_text(
             errors='ignore').splitlines(), 1):
         if not line.lstrip().startswith('>'):
             continue
         for frag in fragments(line):
-            if frag in cache:
+            if any(frag in cache for cache in caches):
                 continue
-            if any(frag.replace(k, v) in cache for k, v in VARIANTS.items()
-                   if k in frag):
+            if any(frag.replace(k, v) in cache
+                   for cache in caches
+                   for k, v in VARIANTS.items() if k in frag):
                 continue
             suspects.append((i, frag))
     return suspects
@@ -69,12 +83,12 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    cache = load_cache(sys.argv[1])
+    caches = load_cache(sys.argv[1])
     total_miss = 0
     for note in sys.argv[2:]:
         if 'ocr' in pathlib.Path(note).parts:  # never scan the cache itself
             continue
-        suspects = check_note(note, cache)
+        suspects = check_note(note, caches)
         name = pathlib.Path(note).name
         if suspects:
             for line_no, frag in suspects:
